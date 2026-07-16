@@ -41,35 +41,19 @@ function Write-Warn($msg) { Write-Host "[!] $msg" -ForegroundColor Yellow }
 function Write-Skip($msg) { Write-Host "[SKIP] $msg" -ForegroundColor Yellow }
 function Write-Err($msg) { Write-Host "[FAIL] $msg" -ForegroundColor Red; exit 1 }
 
-function Install-FactoryDroidPlugin($factoryDir) {
-    if (-not (Test-Command "droid")) {
-        Write-Warn "Droid CLI not found. Factory Droid plugin install cancelled."
-        Write-Info "Install Factory Droid first, then rerun this installer or 'rsy-opencode-tools update':"
-        Write-Info "  irm https://app.factory.ai/cli/windows | iex"
-        Write-Info "Alternative: npm install -g droid"
-        return
-    }
-
-    $marketplaceName = [System.IO.Path]::GetFileName($factoryDir)
-    Write-Info "Installing/updating Factory Droid plugin..."
-    try { Invoke-NativeCommand "droid" @("plugin", "marketplace", "add", $factoryDir) } catch { Write-Warn "Droid marketplace add failed or already exists; continuing. $($_.Exception.Message)" }
-    try {
-        Invoke-NativeCommand "droid" @("plugin", "install", "rsy-opencode-tools@$marketplaceName")
-        Write-Ok "Factory Droid plugin installed/updated."
-    } catch {
-        Write-Warn "Factory Droid plugin install failed or already exists; trying update. $($_.Exception.Message)"
-        try {
-            Invoke-NativeCommand "droid" @("plugin", "update", "rsy-opencode-tools@$marketplaceName")
-            Write-Ok "Factory Droid plugin already installed; updated existing install."
-        } catch {
-            Write-Warn "Factory Droid plugin update failed. Run: droid plugin update rsy-opencode-tools@$marketplaceName. $($_.Exception.Message)"
-        }
-    }
+# True when stdin is interactive. False for irm|iex, CI, redirected stdin.
+function Test-IsInteractive {
+    return -not [Console]::IsInputRedirected
 }
 
 function Install-RTK {
     if (Test-Command "rtk") {
         Write-Skip "RTK already installed: $(rtk --version 2>&1)"
+        return
+    }
+    if (-not (Test-IsInteractive)) {
+        Write-Warn "Non-interactive mode: skipping RTK install."
+        Write-Info "Install later: irm https://raw.githubusercontent.com/rtk-ai/rtk/main/install.ps1 | iex"
         return
     }
     Write-Info "RTK — AI token saver (60-90% less tokens). Install?"
@@ -87,6 +71,11 @@ function Install-RTK {
 function Install-Ponytail {
     if (Test-Command "ponytail") {
         Write-Skip "Ponytail already installed: $(ponytail --version 2>&1)"
+        return
+    }
+    if (-not (Test-IsInteractive)) {
+        Write-Warn "Non-interactive mode: skipping Ponytail install."
+        Write-Info "Install later: npm install -g @dietrichgeber/ponytail"
         return
     }
     Write-Info "Ponytail — laziness-first coding (~54% less code). Install?"
@@ -606,15 +595,6 @@ function Deploy-Config {
         } else {
             Write-Warn "rsy-opencode-tools installed. Restart PowerShell to use it."
         }
-        try {
-            $factoryDir = Join-Path $ConfigDir "factory-rsy"
-            & bun run (Join-Path $installDir "src\index.ts") -- factory export --output $factoryDir --clean --sync-personal | Out-Null
-            if ($LASTEXITCODE -ne 0) { throw "Exit code $LASTEXITCODE" }
-            Write-Ok "Factory Droid plugin package exported to: $factoryDir"
-            Install-FactoryDroidPlugin $factoryDir
-        } catch {
-            Write-Warn "Factory Droid export failed. Run 'rsy-opencode-tools factory export' after install. $($_.Exception.Message)"
-        }
         Stop-StaleOpenCodeProcesses
     } catch {
         Write-Warn "Could not install rsy-opencode-tools CLI globally: $_"
@@ -1007,7 +987,7 @@ function Install-LspServers {
     Write-Host "  Or enter numbers:  1,2,4" -ForegroundColor Yellow
     Write-Host ""
 
-    if ([Console]::IsInputRedirected) {
+    if (-not (Test-IsInteractive)) {
         Write-Warn "Non-interactive mode detected (piped install)."
         Write-Info "Skipping LSP installation. Merging any already-installed LSPs..."
         Merge-LspToOpenCodeConfig

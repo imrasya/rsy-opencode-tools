@@ -17,3 +17,6 @@ docs/
 .opencode-context-archive.md
 .rsy-opencode/
 .rsy-opencode-tools/
+
+# RSY context index runtime state
+.rsy-opencode/context/

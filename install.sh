@@ -51,33 +51,17 @@ warn() { echo -e "${YELLOW}[!]${NC} $1"; }
 error() { echo -e "${RED}[✗]${NC} $1"; exit 1; }
 skip() { echo -e "${YELLOW}[SKIP]${NC} $1"; }
 
-offer_factory_droid_install() {
-    local factory_dir="$1"
-    if ! command -v droid &>/dev/null; then
-        warn "Droid CLI not found. Factory Droid plugin install cancelled."
-        info "Install Factory Droid first, then rerun this installer or 'rsy-opencode-tools update':"
-        info "  curl -fsSL https://app.factory.ai/cli | sh"
-        info "Alternative: npm install -g droid"
-        return
-    fi
-
-    info "Installing/updating Factory Droid plugin..."
-    droid plugin marketplace add "${factory_dir}" \
-        || warn "Droid marketplace add failed or already exists; continuing."
-    local plugin_id="rsy-opencode-tools@$(basename "$factory_dir")"
-    if droid plugin install "$plugin_id"; then
-        success "Factory Droid plugin installed/updated."
-    else
-        warn "Factory Droid plugin install failed or already exists; trying update."
-        droid plugin update "$plugin_id" \
-            && success "Factory Droid plugin already installed; updated existing install." \
-            || warn "Factory Droid plugin update failed. Run: droid plugin update $plugin_id"
-    fi
-}
+# True when stdin is a TTY (interactive). False for curl|bash, CI, redirected stdin.
+is_interactive() { [ -t 0 ]; }
 
 offer_rtk_install() {
     if command -v rtk &>/dev/null; then
         skip "RTK already installed: $(rtk --version 2>/dev/null || true)"
+        return
+    fi
+    if ! is_interactive; then
+        warn "Non-interactive mode: skipping RTK install."
+        info "Install later: curl -fsSL https://raw.githubusercontent.com/rtk-ai/rtk/main/install.sh | bash"
         return
     fi
     info "RTK — AI token saver (60-90% less tokens). Install?"
@@ -98,6 +82,11 @@ offer_rtk_install() {
 offer_ponytail_install() {
     if command -v ponytail &>/dev/null; then
         skip "Ponytail already installed: $(ponytail --version 2>/dev/null || true)"
+        return
+    fi
+    if ! is_interactive; then
+        warn "Non-interactive mode: skipping Ponytail install."
+        info "Install later: npm install -g @dietrichgeber/ponytail"
         return
     fi
     info "Ponytail — laziness-first coding (~54% less code). Install?"
@@ -577,16 +566,8 @@ EOF
 
     if command -v rsy-opencode-tools &>/dev/null; then
         success "rsy-opencode-tools CLI installed globally"
-        rsy-opencode-tools factory export --output "${CONFIG_DIR}/factory-rsy" --clean --sync-personal \
-            && success "Factory Droid plugin package exported to: ${CONFIG_DIR}/factory-rsy" \
-            && offer_factory_droid_install "${CONFIG_DIR}/factory-rsy" \
-            || warn "Factory Droid export failed. Run 'rsy-opencode-tools factory export' after install."
     else
         warn "rsy-opencode-tools installed. Add $bun_bin to PATH or restart your terminal."
-        bun run "$install_dir/src/index.ts" factory export --output "${CONFIG_DIR}/factory-rsy" --clean --sync-personal \
-            && success "Factory Droid plugin package exported to: ${CONFIG_DIR}/factory-rsy" \
-            && offer_factory_droid_install "${CONFIG_DIR}/factory-rsy" \
-            || warn "Factory Droid export failed. Run 'rsy-opencode-tools factory export' after install."
     fi
     terminate_stale_opencode_processes
 
@@ -1188,7 +1169,7 @@ select_and_install_lsp() {
 
     # Detect if stdin is a terminal (interactive) or piped
     local lsp_choice=""
-    if [ -t 0 ]; then
+    if is_interactive; then
         # Interactive terminal — ask user
         read -rp "  Your choice: " lsp_choice
     else

@@ -6,7 +6,6 @@
 import { Command } from "commander";
 import { existsSync, readdirSync } from "fs";
 import { dirname, join } from "path";
-import { homedir } from "os";
 import { cp, mkdir, writeFile, readFile, chmod, rename, rm } from "fs/promises";
 import { platform } from "os";
 import chalk from "chalk";
@@ -23,7 +22,6 @@ import {
 import { EXIT_SUCCESS, EXIT_ERROR } from "../types.js";
 import { GITHUB_RAW_BASE, GITHUB_REPO, VERSION } from "../lib/constants.js";
 import { getRequiredCliPayloadFiles, resolveCliPayloadManifestPath } from "../lib/cli-payload.js";
-import { exportFactoryDroidPlugin, syncFactoryDroidPersonalConfig } from "../lib/factory-droid.js";
 
 async function retryFs<T>(label: string, action: () => Promise<T>, attempts = 5): Promise<T> {
   let last: unknown;
@@ -67,73 +65,6 @@ function isStaleOpenCodeCommand(command: string): boolean {
   return /(^|[\s/])opencode(\s|$)/i.test(normalized)
     || /\.config\/opencode\/cli\/src\/(plugin\/index|mcp\/context-keeper)\.ts/i.test(normalized)
     || /src\/(plugin\/index|mcp\/context-keeper)\.ts/i.test(normalized);
-}
-
-async function runCommand(command: string, args: string[]): Promise<{ code: number; output: string }> {
-  const proc = Bun.spawn([command, ...args], { stdout: "pipe", stderr: "pipe" });
-  const [code, stdoutText, stderrText] = await Promise.all([
-    proc.exited,
-    new Response(proc.stdout).text(),
-    new Response(proc.stderr).text(),
-  ]);
-  return { code, output: `${stdoutText}${stderrText}`.trim() };
-}
-
-async function commandAvailable(command: string): Promise<boolean> {
-  try {
-    const result = await runCommand(command, ["--version"]);
-    return result.code === 0;
-  } catch {
-    return false;
-  }
-}
-
-function printDroidInstallInstructions(): void {
-  warn("Droid CLI not found. Factory Droid plugin install cancelled.");
-  info("Install Factory Droid first, then rerun `rsy-opencode-tools update`:");
-  if (platform() === "win32") {
-    info("  irm https://app.factory.ai/cli/windows | iex");
-  } else {
-    info("  curl -fsSL https://app.factory.ai/cli | sh");
-  }
-  info("Alternative: npm install -g droid");
-}
-
-async function exportAndOfferFactoryDroidInstall(configDir: string): Promise<void> {
-  console.log();
-  heading("Factory Droid Support");
-  const outputDir = join(configDir, "factory-rsy");
-  const result = exportFactoryDroidPlugin(outputDir, {
-    sourceConfigDir: join(configDir, "cli", "config"),
-    cliDir: join(configDir, "cli"),
-    clean: true,
-  });
-  success(`Factory Droid plugin package exported to: ${result.outputDir}`);
-  const factoryConfig = syncFactoryDroidPersonalConfig(join(homedir(), ".factory"), {
-    sourceConfigDir: join(configDir, "cli", "config"),
-    cliDir: join(configDir, "cli"),
-    pluginDir: result.pluginDir,
-  });
-  success(`Factory Droid personal config synced to: ${factoryConfig.configDir}`);
-  info(`Droids: ${factoryConfig.droids}; skills: ${factoryConfig.skills}; MCP servers: ${factoryConfig.mcpServers.join(", ")}`);
-  for (const backup of factoryConfig.backups) info(`Factory Droid backup created: ${backup}`);
-  for (const warning of factoryConfig.warnings) warn(warning);
-
-  if (!(await commandAvailable("droid"))) {
-    printDroidInstallInstructions();
-    return;
-  }
-
-  info("Installing/updating Factory Droid plugin...");
-  const add = await runCommand("droid", ["plugin", "marketplace", "add", result.outputDir]);
-  if (add.code !== 0) warn(`Droid marketplace add reported: ${add.output || `exit ${add.code}`}. Continuing in case it already exists.`);
-  const installResult = await runCommand("droid", ["plugin", "install", `${result.pluginName}@${result.marketplaceName}`]);
-  if (installResult.code === 0) success("Factory Droid plugin installed/updated.");
-  else if (/already installed/i.test(installResult.output)) {
-    const updateResult = await runCommand("droid", ["plugin", "update", `${result.pluginName}@${result.marketplaceName}`]);
-    if (updateResult.code === 0) success("Factory Droid plugin already installed; updated existing install.");
-    else warn(`Factory Droid plugin update failed: ${updateResult.output || `exit ${updateResult.code}`}`);
-  } else warn(`Factory Droid plugin install failed: ${installResult.output || `exit ${installResult.code}`}`);
 }
 
 export function planStaleOpenCodeProcessKills(processes: ProcessSnapshot[], currentPid = process.pid): ProcessSnapshot[] {
@@ -1324,14 +1255,6 @@ export const updateCommand = new Command("update")
       success(`Ran ${migrationsRun} migration(s).`);
     } else {
       info("No migrations needed.");
-    }
-
-    try {
-      await exportAndOfferFactoryDroidInstall(configDir);
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
-      warn(`Factory Droid setup skipped/failed: ${msg}`);
-      warn("Run `rsy-opencode-tools factory export` after update to retry.");
     }
 
     // Final summary

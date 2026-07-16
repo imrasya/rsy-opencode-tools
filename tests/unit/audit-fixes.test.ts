@@ -108,13 +108,19 @@ describe("audit fixes", () => {
     const ps = readFileSync(join(process.cwd(), "install.ps1"), "utf-8");
     const sh = readFileSync(join(process.cwd(), "install.sh"), "utf-8");
 
+    expect(ps).toContain("Test-IsInteractive");
     expect(ps).toContain("[Console]::IsInputRedirected");
     expect(ps).toContain("Merge-LspToOpenCodeConfig");
     expect(ps).toContain("Get-ChildItem $ConfigDir -Force");
     expect(ps).toContain("while (Test-Path $backupDir)");
+    expect(ps).toContain("Non-interactive mode: skipping RTK install.");
+    expect(ps).toContain("Non-interactive mode: skipping Ponytail install.");
+    expect(sh).toContain("is_interactive()");
     expect(sh).toContain("find \"$CONFIG_DIR\" -mindepth 1");
     expect(sh).toContain("while [ -e \"$backup_dir\" ]");
     expect(sh).toContain("merge_lsp_to_opencode_config");
+    expect(sh).toContain("Non-interactive mode: skipping RTK install.");
+    expect(sh).toContain("Non-interactive mode: skipping Ponytail install.");
   });
 
   test("Linux installer uses Linux-appropriate LSP install commands", () => {
