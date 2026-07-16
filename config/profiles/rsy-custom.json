@@ -1,13 +1,12 @@
 {
   "id": "rsy-custom",
-  "name": "RSY Custom — Grok 4.5 via 9Router",
-  "description": "Grok 4.5 via 9Router API",
-  "provider": "9router",
-  "model": "gcli/grok-4.5",
+  "name": "RSY Custom — Anthropic Opus",
+  "description": "Claude Opus via Anthropic API",
+  "provider": "anthropic",
+  "model": "claude-opus-4-20250514",
   "maxTokens": 16384,
   "temperature": 0.3,
-  "apiKeyEnv": "CUSTOM_API_KEY",
-  "endpoint": "http://64.235.34.80:20128/v1",
+  "apiKeyEnv": "ANTHROPIC_API_KEY",
   "tokenSaving": {
     "contextTruncation": true,
     "maxContextMessages": 20

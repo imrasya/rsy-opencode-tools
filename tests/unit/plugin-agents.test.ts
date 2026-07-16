@@ -16,7 +16,7 @@ function tempConfigDir(name: string): string {
 
 function writeProviderConfig(configDir: string): void {
   writeFileSync(join(configDir, "opencode.json"), JSON.stringify({
-    provider: { enowxlabs: { models: { "gpt-5.5": {}, "gpt-5.4": {} } } },
+    provider: { openai: { models: { "gpt-4o": {}, "gpt-4o-mini": {} } } },
   }), "utf-8");
 }
 
@@ -137,11 +137,11 @@ describe("plugin agents", () => {
     const configDir = tempConfigDir("override");
     writeProviderConfig(configDir);
     writeFileSync(join(configDir, "jce-plugin.json"), JSON.stringify({
-      agents: { coder: "enowxlabs/gpt-5.5", frontend: "enowxlabs/gpt-5.4" },
+      agents: { coder: "openai/gpt-4o", frontend: "openai/gpt-4o-mini" },
     }), "utf-8");
     const agents = buildAgentConfigs();
-    expect(agents.coder.model).toBe("enowxlabs/gpt-5.5");
-    expect(agents.frontend.model).toBe("enowxlabs/gpt-5.4");
+    expect(agents.coder.model).toBe("openai/gpt-4o");
+    expect(agents.frontend.model).toBe("openai/gpt-4o-mini");
     expect(agents.debugger.model).toBeUndefined();
   });
 
@@ -149,7 +149,7 @@ describe("plugin agents", () => {
     const configDir = tempConfigDir("invalid");
     writeProviderConfig(configDir);
     writeFileSync(join(configDir, "jce-plugin.json"), JSON.stringify({
-      agents: { coder: "openai/gpt-4o-mini" },
+      agents: { coder: "openai/gpt-nonexistent" },
     }), "utf-8");
     const agents = buildAgentConfigs();
     expect(agents.coder.model).toBeUndefined();

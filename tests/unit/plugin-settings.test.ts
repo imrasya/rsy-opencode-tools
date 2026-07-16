@@ -50,11 +50,11 @@ describe("plugin settings", () => {
 
   test("saves nullable per-agent model settings", async () => {
     const configDir = tempConfigDir("save-settings");
-    await saveRsyPluginSettings({ agents: { coder: null, frontend: "enowxlabs/gpt-5.5", backend: "openai/gpt-5.5-fast" } });
+    await saveRsyPluginSettings({ agents: { coder: null, frontend: "openai/gpt-4o", backend: "openai/gpt-4o-mini" } });
     const saved = JSON.parse(readFileSync(join(configDir, "jce-plugin.json"), "utf-8"));
     expect(saved.agents.coder).toBeNull();
-    expect(saved.agents.frontend).toBe("enowxlabs/gpt-5.5");
-    expect(saved.agents.backend).toBe("openai/gpt-5.5-fast");
+    expect(saved.agents.frontend).toBe("openai/gpt-4o");
+    expect(saved.agents.backend).toBe("openai/gpt-4o-mini");
   });
 
   test("loads configurable agent IDs from native RSY plugin agents only", () => {
@@ -79,13 +79,13 @@ describe("plugin settings", () => {
     const configDir = tempConfigDir("models");
     writeFileSync(join(configDir, "opencode.json"), JSON.stringify({
       provider: {
-        enowxlabs: { models: { "gpt-5.5": {}, "gpt-5.4": {} } },
+        openai: { models: { "gpt-4o": {}, "gpt-4o-mini": {} } },
         openrouter: { models: { "anthropic/claude-sonnet": {} } },
       },
     }), "utf-8");
     expect(listAvailableModels()).toEqual([
-      "enowxlabs/gpt-5.5",
-      "enowxlabs/gpt-5.4",
+      "openai/gpt-4o",
+      "openai/gpt-4o-mini",
       "openrouter/anthropic/claude-sonnet",
     ]);
   });
@@ -98,7 +98,7 @@ describe("plugin settings", () => {
     writeFileSync(join(binDir, "opencode"), `#!${bunPath}\nconsole.log("opencode/minimax-m2.5-free")\nconsole.log("anthropic/claude-opus-4-6")\nconsole.log("openai/gpt-5.5-fast")\n`, { mode: 0o755 });
     writeFileSync(join(binDir, "opencode.cmd"), `@echo opencode/minimax-m2.5-free\r\n@echo anthropic/claude-opus-4-6\r\n@echo openai/gpt-5.5-fast\r\n`, "utf-8");
     writeFileSync(join(configDir, "opencode.json"), JSON.stringify({
-      provider: { enowxlabs: { models: { "gpt-5.5": {} } } },
+      provider: { openai: { models: { "gpt-4o": {} } } },
     }), "utf-8");
     process.env.PATH = `${binDir}${process.platform === "win32" ? ";" : ":"}${originalPath ?? ""}`;
     process.env.Path = process.env.PATH;
@@ -108,7 +108,7 @@ describe("plugin settings", () => {
       "opencode/minimax-m2.5-free",
       "anthropic/claude-opus-4-6",
       "openai/gpt-5.5-fast",
-      "enowxlabs/gpt-5.5",
+      "openai/gpt-4o",
     ]);
     expect(isModelAvailable("openai/gpt-5.5-fast")).toBe(true);
   });
@@ -138,10 +138,10 @@ describe("plugin settings", () => {
   test("validates model strings against available OpenCode provider models", () => {
     const configDir = tempConfigDir("validate");
     writeFileSync(join(configDir, "opencode.json"), JSON.stringify({
-      provider: { enowxlabs: { models: { "gpt-5.5": {} } } },
+      provider: { openai: { models: { "gpt-4o": {} } } },
     }), "utf-8");
     process.env.OPENCODE_JCE_OPENCODE_COMMAND = join(configDir, "missing-opencode");
-    expect(isModelAvailable("enowxlabs/gpt-5.5")).toBe(true);
+    expect(isModelAvailable("openai/gpt-4o")).toBe(true);
     expect(isModelAvailable("openai/gpt-4o-mini")).toBe(false);
   });
 

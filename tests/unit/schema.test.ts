@@ -341,16 +341,16 @@ describe("profile.schema.json validation", () => {
     expect(result.valid).toBe(false);
   });
 
-  test("9router provider passes", async () => {
+  test("anthropic provider passes", async () => {
     const data = {
       id: "rsy-custom",
       name: "RSY Custom",
-      description: "Grok via 9Router",
-      provider: "9router",
-      model: "gcli/grok-4.5",
+      description: "Claude via Anthropic",
+      provider: "anthropic",
+      model: "claude-opus-4-20250514",
       maxTokens: 16384,
       temperature: 0.3,
-      apiKeyEnv: "CUSTOM_API_KEY",
+      apiKeyEnv: "ANTHROPIC_API_KEY",
       tokenSaving: { contextTruncation: true, maxContextMessages: 20 },
     };
     const result = await validateAgainstSchema(data, "profile.schema.json");

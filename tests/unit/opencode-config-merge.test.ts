@@ -166,12 +166,12 @@ describe("opencode config merge", () => {
     // Mirrors the real-world failure: a trailing comma inside an array.
     const malformed = [
       "{",
-      '  "model": "9router/kr/claude-opus-4.8",',
+      '  "model": "anthropic/claude-opus-4-20250514",',
       '  "provider": {',
-      '    "9router": {',
+      '    "anthropic": {',
       '      "models": {',
-      '        "codebuddy/claude-opus-4.6": {',
-      '          "name": "codebuddy/claude-opus-4.6",',
+      '        "claude-opus-4-20250514": {',
+      '          "name": "claude-opus-4-20250514",',
       '          "modalities": { "input": ["text", "image", "pdf",], "output": ["text"] }',
       "        }",
       "      }",
@@ -188,9 +188,9 @@ describe("opencode config merge", () => {
 
     // The file is now valid JSON and every user setting is intact.
     const merged = JSON.parse(readFileSync(configPath, "utf8"));
-    expect(merged.model).toBe("9router/kr/claude-opus-4.8");
-    expect(merged.provider["9router"].models["codebuddy/claude-opus-4.6"].name).toBe("codebuddy/claude-opus-4.6");
-    expect(merged.provider["9router"].models["codebuddy/claude-opus-4.6"].modalities.input).toEqual(["text", "image", "pdf"]);
+    expect(merged.model).toBe("anthropic/claude-opus-4-20250514");
+    expect(merged.provider.anthropic.models["claude-opus-4-20250514"].name).toBe("claude-opus-4-20250514");
+    expect(merged.provider.anthropic.models["claude-opus-4-20250514"].modalities.input).toEqual(["text", "image", "pdf"]);
     // JCE entries were still merged in.
     expect(Array.isArray(merged.plugin)).toBe(true);
 
@@ -263,8 +263,8 @@ describe("opencode config merge", () => {
     // A valid config preceded by a UTF-8 BOM — exactly what PowerShell editors
     // produce, and what made the user's file fail to parse.
     const valid = JSON.stringify({
-      model: "9router/kr/claude-opus-4.8",
-      provider: { "9router": { options: { baseURL: "http://127.0.0.1:20128/v1" } } },
+      model: "anthropic/claude-opus-4-20250514",
+      provider: { anthropic: { options: { apiKey: "test" } } },
     });
     writeFileSync(configPath, "\uFEFF" + valid, "utf8");
 
@@ -278,8 +278,8 @@ describe("opencode config merge", () => {
     expect(text.charCodeAt(0)).not.toBe(0xfeff); // BOM gone
     expect(text).toContain("\n  "); // reformatted with indentation
     const merged = JSON.parse(text);
-    expect(merged.model).toBe("9router/kr/claude-opus-4.8");
-    expect(merged.provider["9router"].options.baseURL).toBe("http://127.0.0.1:20128/v1");
+    expect(merged.model).toBe("anthropic/claude-opus-4-20250514");
+    expect(merged.provider.anthropic.options.apiKey).toBe("test");
     expect(Array.isArray(merged.plugin)).toBe(true);
   });
 });

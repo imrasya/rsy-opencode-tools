@@ -19,7 +19,7 @@
     },
     "provider": {
       "type": "string",
-      "enum": ["openai", "anthropic", "ollama", "auto", "google", "deepseek", "xai", "mistral", "9router"]
+      "enum": ["openai", "anthropic", "ollama", "auto", "google", "deepseek", "xai", "mistral"]
     },
     "model": {
       "type": "string",
