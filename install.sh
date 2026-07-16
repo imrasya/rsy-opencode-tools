@@ -51,8 +51,25 @@ warn() { echo -e "${YELLOW}[!]${NC} $1"; }
 error() { echo -e "${RED}[✗]${NC} $1"; exit 1; }
 skip() { echo -e "${YELLOW}[SKIP]${NC} $1"; }
 
-# True when stdin is a TTY (interactive). False for curl|bash, CI, redirected stdin.
-is_interactive() { [ -t 0 ]; }
+# True when we can prompt the user: stdin TTY, or controlling terminal (/dev/tty).
+# curl|bash has no stdin TTY but still has /dev/tty — keep interactive there.
+# False only in true headless CI (no TTY at all).
+is_interactive() { [ -t 0 ] || [ -r /dev/tty ]; }
+
+# Read a line from the user even when stdin is a pipe (curl|bash).
+# usage: read_prompt varname   # sets $varname; return 1 if no TTY
+read_prompt() {
+    local __rp_var="$1"
+    local __rp_line=""
+    if [ -t 0 ]; then
+        IFS= read -r __rp_line || return 1
+    elif [ -r /dev/tty ]; then
+        IFS= read -r __rp_line </dev/tty || return 1
+    else
+        return 1
+    fi
+    eval "$__rp_var=\$__rp_line"
+}
 
 offer_rtk_install() {
     if command -v rtk &>/dev/null; then
@@ -66,7 +83,8 @@ offer_rtk_install() {
     fi
     info "RTK — AI token saver (60-90% less tokens). Install?"
     local ans
-    printf "  [Y/n]: " >&2; read -r ans
+    printf "  [Y/n]: " >&2
+    read_prompt ans || { warn "Skipping RTK install (no TTY)."; return; }
     case "$ans" in
         n|N|no|NO) warn "Skipping RTK install."; return ;;
         *) ;;
@@ -91,7 +109,8 @@ offer_ponytail_install() {
     fi
     info "Ponytail — laziness-first coding (~54% less code). Install?"
     local ans
-    printf "  [Y/n]: " >&2; read -r ans
+    printf "  [Y/n]: " >&2
+    read_prompt ans || { warn "Skipping Ponytail install (no TTY)."; return; }
     case "$ans" in
         n|N|no|NO) warn "Skipping Ponytail install."; return ;;
         *) ;;
@@ -1135,6 +1154,21 @@ lsp_install_command() {
 }
 
 select_and_install_lsp() {
+    # True headless only (no /dev/tty) — skip before menu. curl|bash still interactive via /dev/tty.
+    if ! is_interactive; then
+        echo ""
+        warn "Non-interactive mode detected (no TTY)."
+        warn "LSP selection requires a terminal — skipping menu."
+        echo ""
+        info "To select LSP servers interactively:"
+        echo -e "  ${CYAN}rsy-opencode-tools setup${NC}              # interactive setup wizard"
+        echo -e "  ${CYAN}rsy-opencode-tools setup --merge-lsp${NC}    # auto-detect installed LSPs"
+        echo ""
+        info "Merging any already-installed LSPs into config..."
+        merge_lsp_to_opencode_config
+        return
+    fi
+
     echo ""
     echo -e "${CYAN}╔══════════════════════════════════════════╗${NC}"
     echo -e "${CYAN}║       LSP Server Installation            ║${NC}"
@@ -1167,25 +1201,13 @@ select_and_install_lsp() {
     echo -e "${CYAN}╚══════════════════════════════════════════╝${NC}"
     echo ""
 
-    # Detect if stdin is a terminal (interactive) or piped
     local lsp_choice=""
-    if is_interactive; then
-        # Interactive terminal — ask user
-        read -rp "  Your choice: " lsp_choice
-    else
-        # Non-interactive (piped via curl | bash) — cannot read input
-        warn "Non-interactive mode detected (piped install)."
-        warn "LSP selection requires interactive terminal."
-        echo ""
-        info "To install LSP servers later, run:"
-        echo -e "  ${CYAN}rsy-opencode-tools setup${NC}          # interactive setup wizard"
-        echo -e "  ${CYAN}rsy-opencode-tools setup --merge-lsp${NC}  # auto-detect installed LSPs"
-        echo ""
-        info "Skipping LSP installation. Merging any already-installed LSPs..."
-        # Still merge whatever LSPs are already installed on the system
+    printf "  Your choice: " >&2
+    read_prompt lsp_choice || {
+        warn "Could not read LSP choice (no TTY)."
         merge_lsp_to_opencode_config
         return
-    fi
+    }
 
     # Parse choice
     local -a selected=()

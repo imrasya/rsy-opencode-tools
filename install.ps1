@@ -41,9 +41,35 @@ function Write-Warn($msg) { Write-Host "[!] $msg" -ForegroundColor Yellow }
 function Write-Skip($msg) { Write-Host "[SKIP] $msg" -ForegroundColor Yellow }
 function Write-Err($msg) { Write-Host "[FAIL] $msg" -ForegroundColor Red; exit 1 }
 
-# True when stdin is interactive. False for irm|iex, CI, redirected stdin.
+# True when we can prompt: stdin not redirected, or console device (CONIN$) available.
+# irm|iex redirects stdin but still has a console — keep interactive there.
+# False only in true headless CI (no console).
 function Test-IsInteractive {
-    return -not [Console]::IsInputRedirected
+    if (-not [Console]::IsInputRedirected) { return $true }
+    try {
+        $fs = [System.IO.File]::Open("CONIN$", [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::ReadWrite)
+        $fs.Dispose()
+        return $true
+    } catch {
+        return $false
+    }
+}
+
+# Read a line even when stdin is a pipe (irm|iex). Uses CONIN$ console device.
+function Read-UserPrompt {
+    param([string]$Prompt)
+    if (-not [Console]::IsInputRedirected) {
+        return Read-Host $Prompt
+    }
+    Write-Host -NoNewline "$Prompt : "
+    $reader = $null
+    try {
+        $stream = [System.IO.File]::Open("CONIN$", [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::ReadWrite)
+        $reader = New-Object System.IO.StreamReader($stream)
+        return $reader.ReadLine()
+    } finally {
+        if ($null -ne $reader) { $reader.Dispose() }
+    }
 }
 
 function Install-RTK {
@@ -57,7 +83,7 @@ function Install-RTK {
         return
     }
     Write-Info "RTK — AI token saver (60-90% less tokens). Install?"
-    $ans = Read-Host "  [Y/n]"
+    $ans = Read-UserPrompt "  [Y/n]"
     if ($ans -match "^(n|N|no|NO)") { Write-Warn "Skipping RTK install."; return }
     Write-Info "Installing RTK..."
     try {
@@ -79,7 +105,7 @@ function Install-Ponytail {
         return
     }
     Write-Info "Ponytail — laziness-first coding (~54% less code). Install?"
-    $ans = Read-Host "  [Y/n]"
+    $ans = Read-UserPrompt "  [Y/n]"
     if ($ans -match "^(n|N|no|NO)") { Write-Warn "Skipping Ponytail install."; return }
     Write-Info "Installing Ponytail..."
     try {
@@ -929,6 +955,21 @@ function Install-McpPackages {
 }
 
 function Install-LspServers {
+    # True headless only (no console) — skip before menu. irm|iex still interactive via CONIN$.
+    if (-not (Test-IsInteractive)) {
+        Write-Host ""
+        Write-Warn "Non-interactive mode detected (no TTY)."
+        Write-Warn "LSP selection requires a terminal — skipping menu."
+        Write-Host ""
+        Write-Info "To select LSP servers interactively:"
+        Write-Host "  rsy-opencode-tools setup"
+        Write-Host "  rsy-opencode-tools setup --merge-lsp"
+        Write-Host ""
+        Write-Info "Merging any already-installed LSPs into config..."
+        Merge-LspToOpenCodeConfig
+        return
+    }
+
     Write-Host ""
     Write-Host "====================================================" -ForegroundColor Cyan
     Write-Host "       LSP Server Installation" -ForegroundColor Cyan
@@ -987,14 +1028,7 @@ function Install-LspServers {
     Write-Host "  Or enter numbers:  1,2,4" -ForegroundColor Yellow
     Write-Host ""
 
-    if (-not (Test-IsInteractive)) {
-        Write-Warn "Non-interactive mode detected (piped install)."
-        Write-Info "Skipping LSP installation. Merging any already-installed LSPs..."
-        Merge-LspToOpenCodeConfig
-        return
-    }
-
-    $choice = Read-Host "  Your choice"
+    $choice = Read-UserPrompt "  Your choice"
 
     # Parse choice
     $selected = @()

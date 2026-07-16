@@ -110,17 +110,41 @@ describe("audit fixes", () => {
 
     expect(ps).toContain("Test-IsInteractive");
     expect(ps).toContain("[Console]::IsInputRedirected");
+    expect(ps).toContain("Read-UserPrompt");
+    expect(ps).toContain("CONIN$");
     expect(ps).toContain("Merge-LspToOpenCodeConfig");
     expect(ps).toContain("Get-ChildItem $ConfigDir -Force");
     expect(ps).toContain("while (Test-Path $backupDir)");
     expect(ps).toContain("Non-interactive mode: skipping RTK install.");
     expect(ps).toContain("Non-interactive mode: skipping Ponytail install.");
     expect(sh).toContain("is_interactive()");
+    expect(sh).toContain("[ -r /dev/tty ]");
+    expect(sh).toContain("read_prompt()");
+    expect(sh).toContain("</dev/tty");
     expect(sh).toContain("find \"$CONFIG_DIR\" -mindepth 1");
     expect(sh).toContain("while [ -e \"$backup_dir\" ]");
     expect(sh).toContain("merge_lsp_to_opencode_config");
     expect(sh).toContain("Non-interactive mode: skipping RTK install.");
     expect(sh).toContain("Non-interactive mode: skipping Ponytail install.");
+
+    // Headless gate before menu; prompts use /dev/tty so curl|bash stays interactive
+    const shLsp = sh.indexOf("select_and_install_lsp()");
+    const shGate = sh.indexOf("if ! is_interactive; then", shLsp);
+    const shMenu = sh.indexOf("LSP Server Installation", shLsp);
+    const shRead = sh.indexOf("read_prompt lsp_choice", shLsp);
+    expect(shLsp).toBeGreaterThanOrEqual(0);
+    expect(shGate).toBeGreaterThan(shLsp);
+    expect(shMenu).toBeGreaterThan(shGate);
+    expect(shRead).toBeGreaterThan(shMenu);
+
+    const psLsp = ps.indexOf("function Install-LspServers");
+    const psGate = ps.indexOf("if (-not (Test-IsInteractive))", psLsp);
+    const psMenu = ps.indexOf("LSP Server Installation", psLsp);
+    const psRead = ps.indexOf("Read-UserPrompt", psLsp);
+    expect(psLsp).toBeGreaterThanOrEqual(0);
+    expect(psGate).toBeGreaterThan(psLsp);
+    expect(psMenu).toBeGreaterThan(psGate);
+    expect(psRead).toBeGreaterThan(psMenu);
   });
 
   test("Linux installer uses Linux-appropriate LSP install commands", () => {
