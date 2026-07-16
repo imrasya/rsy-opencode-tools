@@ -9,6 +9,7 @@ import { extractPromptText } from "./background/spawner.js";
 import { buildDispatchTool, buildStatusTool, buildCollectTool } from "./tools/dispatch.js";
 import { buildAgentConfigs } from "./config.js";
 import { buildNativeAgents } from "../lib/opencode-json-template.js";
+import { sanitizeAgentMap } from "../lib/opencode-config-merge.js";
 import { analyzeCommentDensity, COMMENT_WARNING } from "./hooks/comment-checker.js";
 import { looksLikeCompletionClaim, looksLikeStopEarlyOrConfirmation, shouldWarnForMissingVerification, VERIFICATION_WARNING } from "./hooks/worker-guard.js";
 import { shouldEnforceContinuation, detectPrematureStop, CONTINUATION_PROMPT } from "./hooks/todo-enforcer.js";
@@ -234,6 +235,30 @@ function dropStaleWorkflowAtLoad(memory: RuntimeState): RuntimeState {
 }
 
 const rsyPlugin: Plugin = async (input) => {
+  // Hard boot resilience: never throw out of the plugin factory.
+  // An uncaught throw during plugin load surfaces as OpenCode server 500 on
+  // config.get / app.agents / config.providers (startup "4 of 5 requests failed").
+  try {
+    return await createRsyHooks(input);
+  } catch (error) {
+    const msg = error instanceof Error ? error.message : String(error);
+    try {
+      const logDir = join(input.directory || input.worktree || process.cwd(), ".rsy-opencode");
+      mkdirSync(logDir, { recursive: true });
+      appendFileSync(join(logDir, "plugin-boot-error.log"), `${new Date().toISOString()} plugin factory failed: ${msg}\n`, "utf8");
+    } catch {
+      // ignore log failures
+    }
+    // Minimal hooks so OpenCode still boots; agents may be missing until fix.
+    return {
+      config: async () => {
+        // no-op: refuse to mutate config after factory failure
+      },
+    };
+  }
+};
+
+async function createRsyHooks(input: Parameters<Plugin>[0]): Promise<Hooks> {
   const { client } = input;
   const chineseTranslator = buildChineseTranslator(client);
   const manager = new BackgroundManager({ maxConcurrency: 5 });
@@ -489,7 +514,10 @@ const rsyPlugin: Plugin = async (input) => {
 
   const hooks: Hooks = {
     config: async (config) => {
-      if (!config.agent) (config as any).agent = {};
+      // Sanitize first: mode:null / non-object leftovers fail OpenCode schema
+      // and crash config.get + app.agents (startup "4 of 5 requests failed").
+      const cleaned = sanitizeAgentMap((config as any).agent);
+      (config as any).agent = cleaned.agent;
       // Native OpenCode shape: description + mode + prompt (+ permission).
       // Plugin builders only expose systemPrompt — map so @mention autocomplete works.
       // Re-read settings each config pass so /rsy-agent-model applies without restart.
@@ -1231,7 +1259,7 @@ const rsyPlugin: Plugin = async (input) => {
   };
 
   return hooks;
-};
+}
 
 const pluginModule = {
   id: "rsy-opencode-tools",

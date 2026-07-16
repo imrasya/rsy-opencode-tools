@@ -637,9 +637,10 @@ import fs from "fs";
 import path from "path";
 const opencodeJson = process.env.OPENCODE_JSON;
 const cliDir = process.env.CLI_DIR;
-const configDir = path.dirname(opencodeJson);
 const contextKeeperPath = path.join(cliDir, "src", "mcp", "context-keeper.ts").replace(/\\/g, "/");
 const pluginPath = `file://${path.join(cliDir, "src", "plugin", "index.ts").replace(/\\/g, "/")}`;
+const VALID_MODES = new Set(["primary", "subagent", "all"]);
+const LEGACY = new Set(["jce-worker", "jce-researcher", "oracle", "sisyphus", "librarian"]);
 const defaults = {
   "context-keeper": { type: "local", command: ["bun", "run", contextKeeperPath], env: { PROJECT_ROOT: "${PROJECT_ROOT}" }, enabled: true },
   "context7": { type: "remote", url: "https://mcp.context7.com/mcp", enabled: true },
@@ -663,6 +664,21 @@ if (!config.mcp || typeof config.mcp !== "object") config.mcp = {};
 let added = 0;
 for (const [key, value] of Object.entries(defaults)) {
   if (!(key in config.mcp)) { config.mcp[key] = value; added++; }
+}
+// Sanitize agent map: OpenCode schema rejects mode:null → config.get 500
+if (config.agent && typeof config.agent === "object" && !Array.isArray(config.agent)) {
+  const next = {};
+  for (const [id, raw] of Object.entries(config.agent)) {
+    if (!raw || typeof raw !== "object" || Array.isArray(raw)) continue;
+    const entry = { ...raw };
+    if ("mode" in entry && (typeof entry.mode !== "string" || !VALID_MODES.has(entry.mode))) delete entry.mode;
+    if (LEGACY.has(id) && !(typeof entry.prompt === "string" && entry.prompt.length > 0)) {
+      next[id] = { disable: true, description: typeof entry.description === "string" && entry.description ? entry.description : `Legacy ${id} (disabled)` };
+      continue;
+    }
+    next[id] = entry;
+  }
+  config.agent = next;
 }
 fs.writeFileSync(opencodeJson, JSON.stringify(config, null, 2) + "\n");
 console.log(added);

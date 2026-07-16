@@ -413,6 +413,28 @@ describe("plugin integration", () => {
     expect(config.agent.debugger).toBeDefined();
   });
 
+  test("config hook strips mode:null and normalizes legacy agents so OpenCode schema accepts config", async () => {
+    const mod = await import("../../src/plugin/index.ts");
+    const hooks = await mod.default.server(mockInput);
+
+    const config: any = {
+      agent: {
+        "jce-worker": { mode: null, disable: true, description: "old" },
+        sisyphus: { mode: null },
+        broken: { mode: null, description: "x" },
+      },
+    };
+    await hooks.config!(config);
+    expect(config.agent["jce-worker"].mode).toBeUndefined();
+    expect(config.agent["jce-worker"].disable).toBe(true);
+    expect(config.agent.sisyphus).toEqual({ disable: true, description: "Legacy sisyphus (disabled)" });
+    expect(config.agent.broken.mode).toBeUndefined();
+    expect(config.agent.broken.description).toBe("x");
+    // RSY natives still injected
+    expect(config.agent.coder).toBeDefined();
+    expect(config.agent.explorer).toBeDefined();
+  });
+
   test("config hook creates agent object if missing", async () => {
     const configRoot = tempRoot();
     const configDir = join(configRoot, "opencode");

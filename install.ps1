@@ -879,6 +879,30 @@ function Register-ContextKeeper {
             }
         }
 
+        # Sanitize agent map: OpenCode schema rejects mode:null → config.get 500
+        if ($config.agent) {
+            $validModes = @("primary", "subagent", "all")
+            $legacy = @("jce-worker", "jce-researcher", "oracle", "sisyphus", "librarian")
+            $nextAgent = [PSCustomObject]@{}
+            foreach ($prop in $config.agent.PSObject.Properties) {
+                $id = $prop.Name
+                $raw = $prop.Value
+                if ($null -eq $raw -or $raw -isnot [PSCustomObject]) { continue }
+                $entry = $raw
+                if ($entry.PSObject.Properties["mode"] -and ($entry.mode -isnot [string] -or $validModes -notcontains $entry.mode)) {
+                    $entry.PSObject.Properties.Remove("mode")
+                }
+                $hasPrompt = $entry.PSObject.Properties["prompt"] -and $entry.prompt -is [string] -and $entry.prompt.Length -gt 0
+                if ($legacy -contains $id -and -not $hasPrompt) {
+                    $desc = if ($entry.PSObject.Properties["description"] -and $entry.description) { $entry.description } else { "Legacy $id (disabled)" }
+                    $nextAgent | Add-Member -NotePropertyName $id -NotePropertyValue ([PSCustomObject]@{ disable = $true; description = $desc }) -Force
+                    continue
+                }
+                $nextAgent | Add-Member -NotePropertyName $id -NotePropertyValue $entry -Force
+            }
+            $config.agent = $nextAgent
+        }
+
         # Write back
         $jsonOut = $config | ConvertTo-Json -Depth 100
         [System.IO.File]::WriteAllText($opencodeJson, $jsonOut, [System.Text.UTF8Encoding]::new($false))

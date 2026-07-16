@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { mkdtempSync, mkdirSync, readFileSync, writeFileSync } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
-import { ensureOpenCodeJsonEntries, ensureTuiJsonEntries, stripTrailingCommas, stripBom } from "../../src/lib/opencode-config-merge.ts";
+import { ensureOpenCodeJsonEntries, ensureTuiJsonEntries, stripTrailingCommas, stripBom, sanitizeAgentMap } from "../../src/lib/opencode-config-merge.ts";
 import { readdirSync } from "fs";
 
 function tempConfigDir(): string {
@@ -215,6 +215,46 @@ describe("opencode config merge", () => {
     expect(stripBom("{}")).toBe("{}");
     // A BOM mid-string is not at index 0, so it is left untouched.
     expect(stripBom('{"a":"x\uFEFFy"}')).toBe('{"a":"x\uFEFFy"}');
+  });
+
+  test("sanitizeAgentMap drops invalid mode and disables legacy stubs", () => {
+    const { agent, changed } = sanitizeAgentMap({
+      coder: { mode: "primary", prompt: "ok", description: "coder" },
+      broken: { mode: null, description: "x" },
+      "jce-worker": { mode: null, disable: true, description: "Legacy jce-worker (disabled)" },
+      oracle: { mode: null },
+      garbage: null,
+    });
+    expect(changed).toBe(true);
+    expect(agent.coder).toEqual({ mode: "primary", prompt: "ok", description: "coder" });
+    expect(agent.broken).toEqual({ description: "x" }); // mode:null removed
+    expect((agent.broken as any).mode).toBeUndefined();
+    expect(agent["jce-worker"]).toEqual({ disable: true, description: "Legacy jce-worker (disabled)" });
+    expect(agent.oracle).toEqual({ disable: true, description: "Legacy oracle (disabled)" });
+    expect(agent.garbage).toBeUndefined();
+  });
+
+  test("ensureOpenCodeJsonEntries rewrites mode:null legacy agents so OpenCode schema accepts config", () => {
+    const configDir = tempConfigDir();
+    const configPath = join(configDir, "opencode.json");
+    writeFileSync(configPath, JSON.stringify({
+      agent: {
+        "jce-worker": { mode: null, disable: true, description: "old" },
+        sisyphus: { mode: null },
+        explorer: { mode: "all", prompt: "keep-me", description: "explorer" },
+      },
+    }, null, 2));
+
+    const result = ensureOpenCodeJsonEntries(configDir);
+    expect(result.changed).toBe(true);
+    const merged = JSON.parse(readFileSync(configPath, "utf8"));
+    expect(merged.agent["jce-worker"].mode).toBeUndefined();
+    expect(merged.agent["jce-worker"].disable).toBe(true);
+    expect(merged.agent.sisyphus).toEqual({ disable: true, description: "Legacy sisyphus (disabled)" });
+    expect(merged.agent.explorer.prompt).toBe("keep-me");
+    expect(merged.agent.explorer.mode).toBe("all");
+    // RSY agents still filled in
+    expect(merged.agent.coder).toBeTruthy();
   });
 
   test("tidies a BOM-prefixed file (the real-world cause) and reformats it cleanly", () => {

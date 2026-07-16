@@ -193,6 +193,79 @@ function mergeRecord(existing: unknown, defaults: unknown): Record<string, unkno
   return { ...base, ...Object.fromEntries(Object.entries(additions).filter(([key]) => !(key in base))) };
 }
 
+/** OpenCode AgentConfig.mode enum (opencode.ai/config.json). */
+const VALID_AGENT_MODES = new Set(["primary", "subagent", "all"]);
+
+/**
+ * Known retired RSY/JCE agent ids. Prefer disable over leaving broken entries.
+ * mergeRecord preserves user keys forever — without this, re-install keeps
+ * mode:null / incomplete agents that fail OpenCode config schema → 500 on
+ * config.get / app.agents / providers.
+ */
+export const LEGACY_AGENT_IDS = [
+  "jce-worker",
+  "jce-researcher",
+  "oracle",
+  "sisyphus",
+  "librarian",
+] as const;
+
+/**
+ * Normalize agent map so OpenCode schema accepts it.
+ * - Drop invalid mode (null, wrong type, unknown enum) — omit = default "all"
+ * - Legacy ids without a valid prompt → disable:true (hide from UI, keep key)
+ * - Non-object / null agent values → removed
+ * Returns { agent, changed } so callers can rewrite only when needed.
+ */
+export function sanitizeAgentMap(agent: unknown): { agent: Record<string, unknown>; changed: boolean } {
+  if (!agent || typeof agent !== "object" || Array.isArray(agent)) {
+    return { agent: {}, changed: agent != null && agent !== undefined };
+  }
+  const input = agent as Record<string, unknown>;
+  const out: Record<string, unknown> = {};
+  let changed = false;
+
+  for (const [id, raw] of Object.entries(input)) {
+    if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
+      changed = true;
+      continue;
+    }
+    const entry = { ...(raw as Record<string, unknown>) };
+    let entryChanged = false;
+
+    if ("mode" in entry) {
+      const mode = entry.mode;
+      if (typeof mode !== "string" || !VALID_AGENT_MODES.has(mode)) {
+        delete entry.mode;
+        entryChanged = true;
+      }
+    }
+
+    const isLegacy = (LEGACY_AGENT_IDS as readonly string[]).includes(id);
+    const hasPrompt = typeof entry.prompt === "string" && entry.prompt.length > 0;
+    if (isLegacy && !hasPrompt) {
+      // Keep a minimal disable stub so @mentions don't resurrect ghosts.
+      const stub = {
+        disable: true,
+        description: typeof entry.description === "string" && entry.description.length > 0
+          ? entry.description
+          : `Legacy ${id} (disabled)`,
+      };
+      if (JSON.stringify(entry) !== JSON.stringify(stub)) {
+        out[id] = stub;
+        changed = true;
+        continue;
+      }
+    }
+
+    if (entryChanged) changed = true;
+    out[id] = entryChanged ? entry : raw;
+  }
+
+  if (Object.keys(out).length !== Object.keys(input).length) changed = true;
+  return { agent: out, changed };
+}
+
 export function readOrRepairOpenCodeJson(configDir: string): ReadOpenCodeJsonResult {
   const configPath = join(configDir, "opencode.json");
   mkdirSync(configDir, { recursive: true });
@@ -259,7 +332,10 @@ export function ensureOpenCodeJsonEntries(configDir: string): EnsureOpenCodeJson
   const merged: Record<string, unknown> = { ...current };
   if (!("$schema" in merged) && "$schema" in defaults) merged.$schema = defaults.$schema;
   merged.plugin = mergePluginArray(merged.plugin, defaults.plugin);
-  merged.agent = mergeRecord(merged.agent, defaults.agent);
+  // Merge RSY defaults first, then sanitize: strips mode:null / non-object
+  // leftovers that OpenCode schema rejects (config.get / app.agents 500).
+  const mergedAgents = mergeRecord(merged.agent, defaults.agent);
+  merged.agent = sanitizeAgentMap(mergedAgents).agent;
   merged.mcp = mergeRecord(merged.mcp, defaults.mcp);
   merged.lsp = mergeRecord(merged.lsp, defaults.lsp);
   // permission / command / formatter / subagent_depth: only fill when missing (never clobber user)
