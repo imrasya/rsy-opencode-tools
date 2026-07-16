@@ -777,7 +777,9 @@ ensure_cargo() {
         *)      return 1;;
     esac
     if [ "${OPENCODE_JCE_ALLOW_UNVERIFIED_DOWNLOAD:-}" != "1" ]; then
-        error "Rustup auto-install is disabled because sh.rustup.rs has no pinned checksum. Install Rust manually from https://rustup.rs or rerun with OPENCODE_JCE_ALLOW_UNVERIFIED_DOWNLOAD=1."
+        # warn+return — never abort whole installer mid-LSP loop
+        warn "Rustup auto-install disabled (no pinned checksum). Install Rust from https://rustup.rs or set OPENCODE_JCE_ALLOW_UNVERIFIED_DOWNLOAD=1."
+        return 1
     fi
     local rustup_installer="${TEMP_DIR}.rustup-init.sh"
     curl --proto '=https' --tlsv1.2 -fsSL https://sh.rustup.rs -o "$rustup_installer"
@@ -1196,6 +1198,7 @@ select_and_install_lsp() {
     done
 
     echo -e "${CYAN}║                                          ║${NC}"
+    echo -e "${CYAN}║  ${BOLD}f${NC}${CYAN} = Famous (Python TS HTML CSS Bash…)  ║${NC}"
     echo -e "${CYAN}║  ${BOLD}a${NC}${CYAN} = Install all    ${BOLD}s${NC}${CYAN} = Skip all          ║${NC}"
     echo -e "${CYAN}║  Or enter numbers: ${BOLD}1,2,4${NC}${CYAN}                 ║${NC}"
     echo -e "${CYAN}╚══════════════════════════════════════════╝${NC}"
@@ -1211,8 +1214,28 @@ select_and_install_lsp() {
 
     # Parse choice
     local -a selected=()
+    # Famous / popular web+scripting stack (1-based menu numbers)
+    # Python TS Go Docker SQL Bash YAML HTML CSS Tailwind Markdown
+    local -a FAMOUS_LSP_NUMS=(1 2 4 5 6 12 13 14 15 22 24)
 
     case "$lsp_choice" in
+        [fF])
+            for num in "${FAMOUS_LSP_NUMS[@]}"; do
+                local i=$((num - 1))
+                local is_installed=false
+                for j in "${ALREADY_INSTALLED[@]:-}"; do
+                    if [ "$i" = "$j" ]; then
+                        is_installed=true
+                        break
+                    fi
+                done
+                if [ "$is_installed" = false ]; then
+                    selected+=("$i")
+                else
+                    skip "${LSP_NAMES[$i]} already installed, skipping."
+                fi
+            done
+            ;;
         [aA])
             # Select all that are not already installed
             for i in "${!LSP_NAMES[@]}"; do
@@ -1288,8 +1311,8 @@ select_and_install_lsp() {
             continue
         fi
 
-        # Run install command
-        if eval "$install_cmd" &>/dev/null; then
+        # Subshell: LSP helpers must never abort the whole installer (set -e / exit)
+        if ( eval "$install_cmd" ) &>/dev/null; then
             echo -e "${GREEN}✅${NC}"
             installed_count=$((installed_count + 1))
         else

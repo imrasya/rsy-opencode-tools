@@ -1024,6 +1024,7 @@ function Install-LspServers {
     }
 
     Write-Host ""
+    Write-Host "  f = Famous (Python TS HTML CSS Bash...)" -ForegroundColor Yellow
     Write-Host "  a = Install all    s = Skip all" -ForegroundColor Yellow
     Write-Host "  Or enter numbers:  1,2,4" -ForegroundColor Yellow
     Write-Host ""
@@ -1032,8 +1033,21 @@ function Install-LspServers {
 
     # Parse choice
     $selected = @()
+    # Famous / popular web+scripting stack (menu numbers)
+    $famousNums = @(1, 2, 4, 5, 6, 12, 13, 14, 15, 22, 24)
 
     switch -Regex ($choice) {
+        "^[fF]$" {
+            foreach ($num in $famousNums) {
+                $lsp = $lspServers | Where-Object { $_.Num -eq $num }
+                if (-not $lsp) { continue }
+                if ($alreadyInstalled -contains $num) {
+                    Write-Skip "$($lsp.Name) already installed, skipping."
+                } else {
+                    $selected += $lsp
+                }
+            }
+        }
         "^[aA]$" {
             foreach ($lsp in $lspServers) {
                 if ($alreadyInstalled -notcontains $lsp.Num) {

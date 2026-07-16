@@ -177,6 +177,28 @@ describe("audit fixes", () => {
     expect(sh).not.toContain('"brew install marksman || cargo install marksman"');
   });
 
+  test("LSP loop survives cargo/rustup failure and offers famous preset", () => {
+    const sh = readFileSync(join(process.cwd(), "install.sh"), "utf-8");
+    const ps = readFileSync(join(process.cwd(), "install.ps1"), "utf-8");
+
+    // ensure_cargo must not call error() (exit 1) — kills whole installer mid-LSP
+    const cargo = sh.slice(sh.indexOf("ensure_cargo()"), sh.indexOf("ensure_go()"));
+    expect(cargo).toContain("return 1");
+    expect(cargo).not.toMatch(/\berror\s+"/);
+    expect(cargo).toContain("warn \"Rustup auto-install disabled");
+
+    // per-LSP install in subshell so set -e / exit cannot abort installer
+    expect(sh).toContain('( eval "$install_cmd" )');
+
+    // famous preset
+    expect(sh).toContain("FAMOUS_LSP_NUMS");
+    expect(sh).toContain("[fF]");
+    expect(sh).toContain("= Famous (Python TS HTML CSS Bash");
+    expect(ps).toContain("$famousNums");
+    expect(ps).toContain("^[fF]$");
+    expect(ps).toContain("f = Famous");
+  });
+
   test("Linux LSP install commands are resolved by selected OS and package manager", () => {
     const sh = readFileSync(join(process.cwd(), "install.sh"), "utf-8");
 
