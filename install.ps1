@@ -95,24 +95,70 @@ function Install-RTK {
 }
 
 function Install-Ponytail {
-    if (Test-Command "ponytail") {
-        Write-Skip "Ponytail already installed: $(ponytail --version 2>&1)"
-        return
+    # OpenCode plugin (not a global CLI). Correct npm scope: @dietrichgebert (not geber).
+    # Docs: https://github.com/DietrichGebert/ponytail — plugin: ["@dietrichgebert/ponytail"]
+    $pkg = "@dietrichgebert/ponytail"
+    $opencodeJson = Join-Path $ConfigDir "opencode.json"
+    $manualHint = "Add to opencode.json: `"plugin`": [`"$pkg`"]  (https://github.com/DietrichGebert/ponytail)"
+
+    if (Test-Path $opencodeJson) {
+        try {
+            $cfg = Get-Content $opencodeJson -Raw | ConvertFrom-Json
+            $plugins = @($cfg.plugin)
+            $already = $false
+            foreach ($p in $plugins) {
+                if ($p -is [string] -and $p -eq $pkg) { $already = $true; break }
+                if ($p -is [System.Array] -and $p.Count -gt 0 -and $p[0] -eq $pkg) { $already = $true; break }
+            }
+            if ($already) {
+                Write-Skip "Ponytail already registered in opencode.json"
+                return
+            }
+        } catch { }
     }
     if (-not (Test-IsInteractive)) {
         Write-Warn "Non-interactive mode: skipping Ponytail install."
-        Write-Info "Install later: npm install -g @dietrichgeber/ponytail"
+        Write-Info "Install later: $manualHint"
         return
     }
-    Write-Info "Ponytail — laziness-first coding (~54% less code). Install?"
+    Write-Info "Ponytail — laziness-first coding (~54% less code). Register OpenCode plugin?"
     $ans = Read-UserPrompt "  [Y/n]"
     if ($ans -match "^(n|N|no|NO)") { Write-Warn "Skipping Ponytail install."; return }
-    Write-Info "Installing Ponytail..."
+    Write-Info "Registering Ponytail plugin in opencode.json..."
     try {
-        npm install -g @dietrichgeber/ponytail
-        Write-Ok "Ponytail installed globally."
+        if (-not $ConfigDir) { throw "ConfigDir unset" }
+        if (Test-Path $opencodeJson) {
+            try {
+                $config = Get-Content $opencodeJson -Raw | ConvertFrom-Json
+            } catch {
+                $backupPath = "$opencodeJson.invalid-$(Get-Date -Format 'yyyy-MM-ddTHH-mm-ss')"
+                Move-Item $opencodeJson $backupPath -Force
+                Write-Warn "Malformed opencode.json backed up to $backupPath and rebuilt."
+                $config = [PSCustomObject]@{
+                    '$schema' = "https://opencode.ai/config.json"
+                    plugin = @()
+                    mcp = [PSCustomObject]@{}
+                    lsp = [PSCustomObject]@{}
+                }
+            }
+        } else {
+            $config = [PSCustomObject]@{
+                '$schema' = "https://opencode.ai/config.json"
+                plugin = @()
+                mcp = [PSCustomObject]@{}
+                lsp = [PSCustomObject]@{}
+            }
+        }
+        if (-not $config.plugin) { $config | Add-Member -NotePropertyName "plugin" -NotePropertyValue @() }
+        $plugins = @($config.plugin)
+        if ($plugins -notcontains $pkg) {
+            $config.plugin = $plugins + $pkg
+        }
+        $jsonOut = $config | ConvertTo-Json -Depth 100
+        [System.IO.File]::WriteAllText($opencodeJson, $jsonOut, [System.Text.UTF8Encoding]::new($false))
+        Write-Ok "Ponytail plugin registered ($pkg). Restart OpenCode to activate."
     } catch {
-        Write-Warn "Ponytail install failed. Install manually: npm install -g @dietrichgeber/ponytail"
+        Write-Warn "Ponytail register failed. $manualHint"
     }
 }
 

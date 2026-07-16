@@ -98,16 +98,22 @@ offer_rtk_install() {
 }
 
 offer_ponytail_install() {
-    if command -v ponytail &>/dev/null; then
-        skip "Ponytail already installed: $(ponytail --version 2>/dev/null || true)"
+    # OpenCode plugin (not a global CLI). Correct npm scope: @dietrichgebert (not geber).
+    # Docs: https://github.com/DietrichGebert/ponytail — plugin: ["@dietrichgebert/ponytail"]
+    local pkg="@dietrichgebert/ponytail"
+    local opencode_json="${CONFIG_DIR}/opencode.json"
+    local manual_hint="Add to opencode.json: \"plugin\": [\"${pkg}\"]  (https://github.com/DietrichGebert/ponytail)"
+
+    if [ -f "$opencode_json" ] && grep -qF "$pkg" "$opencode_json" 2>/dev/null; then
+        skip "Ponytail already registered in opencode.json"
         return
     fi
     if ! is_interactive; then
         warn "Non-interactive mode: skipping Ponytail install."
-        info "Install later: npm install -g @dietrichgeber/ponytail"
+        info "Install later: $manual_hint"
         return
     fi
-    info "Ponytail — laziness-first coding (~54% less code). Install?"
+    info "Ponytail — laziness-first coding (~54% less code). Register OpenCode plugin?"
     local ans
     printf "  [Y/n]: " >&2
     read_prompt ans || { warn "Skipping Ponytail install (no TTY)."; return; }
@@ -115,14 +121,32 @@ offer_ponytail_install() {
         n|N|no|NO) warn "Skipping Ponytail install."; return ;;
         *) ;;
     esac
-    info "Installing Ponytail..."
-    if npm install -g @dietrichgeber/ponytail 2>/dev/null; then
-        success "Ponytail installed globally."
-    elif bun install -g @dietrichgeber/ponytail 2>/dev/null; then
-        success "Ponytail installed via Bun."
-    else
-        warn "Ponytail install failed. Install manually: npm install -g @dietrichgeber/ponytail"
+    info "Registering Ponytail plugin in opencode.json..."
+    if [ -z "${CONFIG_DIR:-}" ]; then
+        warn "CONFIG_DIR unset. $manual_hint"
+        return
     fi
+    OPENCODE_JSON="$opencode_json" PONYTAIL_PKG="$pkg" bun -e '
+import fs from "fs";
+const opencodeJson = process.env.OPENCODE_JSON;
+const pkg = process.env.PONYTAIL_PKG;
+let config = { "$schema": "https://opencode.ai/config.json", plugin: [], mcp: {}, lsp: {} };
+if (fs.existsSync(opencodeJson)) {
+  try {
+    config = JSON.parse(fs.readFileSync(opencodeJson, "utf8"));
+  } catch {
+    const backup = `${opencodeJson}.invalid-${new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19)}`;
+    fs.renameSync(opencodeJson, backup);
+  }
+}
+if (!Array.isArray(config.plugin)) config.plugin = [];
+const already = config.plugin.some((p) => p === pkg || (Array.isArray(p) && p[0] === pkg));
+if (!already) config.plugin.push(pkg);
+fs.mkdirSync(require("path").dirname(opencodeJson), { recursive: true });
+fs.writeFileSync(opencodeJson, JSON.stringify(config, null, 2) + "\n");
+console.log(already ? "exists" : "added");
+' 2>/dev/null && success "Ponytail plugin registered (${pkg}). Restart OpenCode to activate." \
+        || warn "Ponytail register failed. $manual_hint"
 }
 
 ensure_fish_bun_path() {

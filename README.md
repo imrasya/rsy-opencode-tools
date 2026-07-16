@@ -23,7 +23,7 @@ RSY Open Code Tools is a plugin and installer for **OpenCode CLI**. It adds a fo
 Built for OpenCode CLI, enhanced with:
 - **Matt Pocock engineering skills** (18 skills: TDD, PRD, QA, refactoring, architecture, etc.)
 - **RTK** token saver support (60-90% less tokens)
-- **Ponytail** laziness-first coding support (~54% less code)
+- **Ponytail** OpenCode plugin for laziness-first coding (~54% less code) — `@dietrichgebert/ponytail`
 - Agent roster: **coder** + **orchestration** + **debugger** + **explorer** + **plan** + **plan-critic** + **frontend** + **android** + **researcher**
 
 ## How Orchestration Works
@@ -87,7 +87,7 @@ rsy-opencode-tools doctor
 - Safe config merge and repair helpers
 - `rsy-opencode-tools` maintenance CLI
 
-Optional: RTK (token saver) + Ponytail (lazy-first coding) auto-install prompts.
+Optional: RTK (token saver) + Ponytail (`@dietrichgebert/ponytail` OpenCode plugin) auto-install prompts.
 
 ## Agents
 

@@ -117,6 +117,9 @@ describe("audit fixes", () => {
     expect(ps).toContain("while (Test-Path $backupDir)");
     expect(ps).toContain("Non-interactive mode: skipping RTK install.");
     expect(ps).toContain("Non-interactive mode: skipping Ponytail install.");
+    expect(ps).toContain("@dietrichgebert/ponytail");
+    expect(ps).not.toContain("@dietrichgeber/ponytail");
+    expect(ps).toContain("Ponytail already registered in opencode.json");
     expect(sh).toContain("is_interactive()");
     expect(sh).toContain("[ -r /dev/tty ]");
     expect(sh).toContain("read_prompt()");
@@ -126,6 +129,11 @@ describe("audit fixes", () => {
     expect(sh).toContain("merge_lsp_to_opencode_config");
     expect(sh).toContain("Non-interactive mode: skipping RTK install.");
     expect(sh).toContain("Non-interactive mode: skipping Ponytail install.");
+    expect(sh).toContain("@dietrichgebert/ponytail");
+    expect(sh).not.toContain("@dietrichgeber/ponytail");
+    expect(sh).toContain("Ponytail already registered in opencode.json");
+    expect(sh).not.toContain("npm install -g @dietrich");
+    expect(ps).not.toContain("npm install -g @dietrich");
 
     // Headless gate before menu; prompts use /dev/tty so curl|bash stays interactive
     const shLsp = sh.indexOf("select_and_install_lsp()");
