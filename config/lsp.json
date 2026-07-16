@@ -1,0 +1,200 @@
+{
+  "lsp": {
+    "python": {
+      "server": "pyright",
+      "command": "pyright-langserver",
+      "args": ["--stdio"],
+      "filetypes": ["python"],
+      "installCommand": "npm install -g pyright"
+    },
+    "typescript": {
+      "server": "typescript-language-server",
+      "command": "typescript-language-server",
+      "args": ["--stdio"],
+      "filetypes": ["typescript", "javascript", "typescriptreact", "javascriptreact"],
+      "installCommand": "npm install -g typescript-language-server typescript"
+    },
+    "rust": {
+      "server": "rust-analyzer",
+      "command": "rust-analyzer",
+      "args": [],
+      "filetypes": ["rust"],
+      "installCommand": "rustup component add rust-analyzer || sudo apt-get install -y rust-analyzer"
+    },
+    "docker": {
+      "server": "dockerfile-language-server",
+      "command": "docker-langserver",
+      "args": ["--stdio"],
+      "filetypes": ["dockerfile"],
+      "installCommand": "npm install -g dockerfile-language-server-nodejs"
+    },
+    "sql": {
+      "server": "sql-language-server",
+      "command": "sql-language-server",
+      "args": ["up", "--method", "stdio"],
+      "filetypes": ["sql"],
+      "installCommand": "npm install -g sql-language-server"
+    },
+    "go": {
+      "server": "gopls",
+      "command": "gopls",
+      "args": ["serve"],
+      "filetypes": ["go"],
+      "installCommand": "go install golang.org/x/tools/gopls@latest"
+    },
+    "java": {
+      "server": "jdtls",
+      "command": "jdtls",
+      "args": [],
+      "filetypes": ["java"],
+      "installCommand": "install via installer: download Eclipse JDTLS and create jdtls shim"
+    },
+    "cpp": {
+      "server": "clangd",
+      "command": "clangd",
+      "args": ["--background-index"],
+      "filetypes": ["c", "cpp", "objc"],
+      "installCommand": "sudo apt-get update && sudo apt-get install -y clangd"
+    },
+    "php": {
+      "server": "intelephense",
+      "command": "intelephense",
+      "args": ["--stdio"],
+      "filetypes": ["php"],
+      "installCommand": "npm install -g intelephense"
+    },
+    "ruby": {
+      "server": "solargraph",
+      "command": "solargraph",
+      "args": ["stdio"],
+      "filetypes": ["ruby"],
+      "installCommand": "gem install solargraph"
+    },
+    "csharp": {
+      "server": "csharp-ls",
+      "command": "csharp-ls",
+      "args": [],
+      "filetypes": ["csharp"],
+      "installCommand": "dotnet tool install -g csharp-ls || dotnet tool update -g csharp-ls"
+    },
+    "bash": {
+      "server": "bash-language-server",
+      "command": "bash-language-server",
+      "args": ["start"],
+      "filetypes": ["bash", "sh", "zsh"],
+      "installCommand": "npm install -g bash-language-server"
+    },
+    "yaml": {
+      "server": "yaml-language-server",
+      "command": "yaml-language-server",
+      "args": ["--stdio"],
+      "filetypes": ["yaml", "yml"],
+      "installCommand": "npm install -g yaml-language-server"
+    },
+    "html": {
+      "server": "vscode-html-language-server",
+      "command": "vscode-html-language-server",
+      "args": ["--stdio"],
+      "filetypes": ["html", "htm"],
+      "installCommand": "npm install -g vscode-langservers-extracted"
+    },
+    "css": {
+      "server": "vscode-css-language-server",
+      "command": "vscode-css-language-server",
+      "args": ["--stdio"],
+      "filetypes": ["css", "scss", "less"],
+      "installCommand": "npm install -g vscode-langservers-extracted"
+    },
+    "kotlin": {
+      "server": "kotlin-language-server",
+      "command": "kotlin-language-server",
+      "args": [],
+      "filetypes": ["kotlin"],
+      "installCommand": "download fwcd/kotlin-language-server server.zip from GitHub releases and symlink bin/kotlin-language-server"
+    },
+    "dart": {
+      "server": "dart-language-server",
+      "command": "dart",
+      "args": ["language-server", "--protocol=lsp"],
+      "filetypes": ["dart"],
+      "installCommand": "sudo apt-get install apt-transport-https && add Dart apt repository, then sudo apt-get install -y dart"
+    },
+    "lua": {
+      "server": "lua-language-server",
+      "command": "lua-language-server",
+      "args": [],
+      "filetypes": ["lua"],
+      "installCommand": "sudo apt-get update && sudo apt-get install -y lua-language-server"
+    },
+    "svelte": {
+      "server": "svelte-language-server",
+      "command": "svelteserver",
+      "args": ["--stdio"],
+      "filetypes": ["svelte"],
+      "installCommand": "npm install -g svelte-language-server"
+    },
+    "vue": {
+      "server": "vue-language-server",
+      "command": "vue-language-server",
+      "args": ["--stdio"],
+      "filetypes": ["vue"],
+      "installCommand": "npm install -g @vue/language-server"
+    },
+    "terraform": {
+      "server": "terraform-ls",
+      "command": "terraform-ls",
+      "args": ["serve"],
+      "filetypes": ["terraform", "hcl", "tf"],
+      "installCommand": "download hashicorp/terraform-ls linux zip from GitHub releases and place terraform-ls on PATH"
+    },
+    "tailwindcss": {
+      "server": "tailwindcss-language-server",
+      "command": "tailwindcss-language-server",
+      "args": ["--stdio"],
+      "filetypes": ["html", "css", "javascript", "typescript", "vue", "svelte"],
+      "installCommand": "npm install -g @tailwindcss/language-server"
+    },
+    "zig": {
+      "server": "zls",
+      "command": "zls",
+      "args": [],
+      "filetypes": ["zig"],
+      "installCommand": "download zigtools/zls linux tarball from GitHub releases and place zls on PATH"
+    },
+    "markdown": {
+      "server": "marksman",
+      "command": "marksman",
+      "args": ["server"],
+      "filetypes": ["markdown"],
+      "installCommand": "download marksman-linux-x64 from GitHub releases or cargo install marksman"
+    },
+    "toml": {
+      "server": "taplo",
+      "command": "taplo",
+      "args": ["lsp", "stdio"],
+      "filetypes": ["toml"],
+      "installCommand": "cargo install taplo-cli --features lsp"
+    },
+    "graphql": {
+      "server": "graphql-language-service",
+      "command": "graphql-lsp",
+      "args": ["server", "-m", "stream"],
+      "filetypes": ["graphql", "gql"],
+      "installCommand": "npm install -g graphql-language-service-cli"
+    },
+    "elixir": {
+      "server": "elixir-ls",
+      "command": "elixir-ls",
+      "args": [],
+      "filetypes": ["elixir", "eelixir"],
+      "installCommand": "mix archive.install hex elixir_ls --force"
+    },
+    "scala": {
+      "server": "metals",
+      "command": "metals",
+      "args": [],
+      "filetypes": ["scala", "sbt"],
+      "installCommand": "cs install metals"
+    }
+  }
+}

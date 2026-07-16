@@ -1,0 +1,1354 @@
+// TODO(decompose): This module is 1200+ lines. Consider splitting into:
+// - update-download.ts (fetch, verify, stage)
+// - update-install.ts (atomic swap, rollback, cleanup)
+// - update-config.ts (config merge, backup, migration)
+// See audit-2026-06-13.
+import { Command } from "commander";
+import { existsSync, readdirSync } from "fs";
+import { dirname, join } from "path";
+import { homedir } from "os";
+import { cp, mkdir, writeFile, readFile, chmod, rename, rm } from "fs/promises";
+import { platform } from "os";
+import chalk from "chalk";
+import { getConfigDir } from "../lib/config.js";
+import { ensureOpenCodeJsonEntries, ensureTuiJsonEntries } from "../lib/opencode-config-merge.js";
+import { banner, heading, info, success, warn, error } from "../lib/ui.js";
+import { logCommandStart, logCommandSuccess, logCommandError } from "../lib/logger.js";
+import {
+  CURRENT_CONFIG_VERSION,
+  initVersionFile,
+  runMigrations,
+  compareVersions,
+} from "../lib/version.js";
+import { EXIT_SUCCESS, EXIT_ERROR } from "../types.js";
+import { GITHUB_RAW_BASE, GITHUB_REPO, VERSION } from "../lib/constants.js";
+import { getRequiredCliPayloadFiles, resolveCliPayloadManifestPath } from "../lib/cli-payload.js";
+import { exportFactoryDroidPlugin, syncFactoryDroidPersonalConfig } from "../lib/factory-droid.js";
+
+async function retryFs<T>(label: string, action: () => Promise<T>, attempts = 5): Promise<T> {
+  let last: unknown;
+  for (let i = 0; i < attempts; i += 1) {
+    try {
+      return await action();
+    } catch (err) {
+      last = err;
+      const code = (err as { code?: string })?.code;
+      if (!(["EBUSY", "EPERM", "ENOTEMPTY"].includes(code ?? "")) || i === attempts - 1) break;
+      await new Promise((resolve) => setTimeout(resolve, 100 * (i + 1)));
+    }
+  }
+  const detail = last instanceof Error ? last.message : String(last);
+  throw new Error(`${label} failed after ${attempts} attempt(s): ${detail}`);
+}
+
+export function assertCliPayloadComplete(dir: string): void {
+  const REQUIRED_CLI_PAYLOAD_FILES = getRequiredCliPayloadFiles(dir);
+  const missing = REQUIRED_CLI_PAYLOAD_FILES.filter((file) => !existsSync(join(dir, file)));
+  if (missing.length > 0) throw new Error(`Downloaded CLI source is incomplete; missing: ${missing.join(", ")}`);
+}
+
+export function resolveCliPayloadManifestForInstalledBase(baseDir: string): string {
+  return resolveCliPayloadManifestPath(baseDir);
+}
+
+export interface ProcessSnapshot {
+  pid: number;
+  ppid: number;
+  command: string;
+}
+
+function isUpdateProcessCommand(command: string): boolean {
+  return /\bopencode-jce(?:\.cmd|\.ps1|\.exe)?\b[\s\S]*\bupdate\b/i.test(command) || /src[\\/]index\.ts[\s\S]*\bupdate\b/i.test(command);
+}
+
+function isStaleOpenCodeCommand(command: string): boolean {
+  const normalized = command.replace(/\\/g, "/");
+  if (isUpdateProcessCommand(normalized)) return false;
+  return /(^|[\s/])opencode(\s|$)/i.test(normalized)
+    || /\.config\/opencode\/cli\/src\/(plugin\/index|mcp\/context-keeper)\.ts/i.test(normalized)
+    || /src\/(plugin\/index|mcp\/context-keeper)\.ts/i.test(normalized);
+}
+
+async function runCommand(command: string, args: string[]): Promise<{ code: number; output: string }> {
+  const proc = Bun.spawn([command, ...args], { stdout: "pipe", stderr: "pipe" });
+  const [code, stdoutText, stderrText] = await Promise.all([
+    proc.exited,
+    new Response(proc.stdout).text(),
+    new Response(proc.stderr).text(),
+  ]);
+  return { code, output: `${stdoutText}${stderrText}`.trim() };
+}
+
+async function commandAvailable(command: string): Promise<boolean> {
+  try {
+    const result = await runCommand(command, ["--version"]);
+    return result.code === 0;
+  } catch {
+    return false;
+  }
+}
+
+function printDroidInstallInstructions(): void {
+  warn("Droid CLI not found. Factory Droid plugin install cancelled.");
+  info("Install Factory Droid first, then rerun `rsy-opencode-tools update`:");
+  if (platform() === "win32") {
+    info("  irm https://app.factory.ai/cli/windows | iex");
+  } else {
+    info("  curl -fsSL https://app.factory.ai/cli | sh");
+  }
+  info("Alternative: npm install -g droid");
+}
+
+async function exportAndOfferFactoryDroidInstall(configDir: string): Promise<void> {
+  console.log();
+  heading("Factory Droid Support");
+  const outputDir = join(configDir, "factory-rsy");
+  const result = exportFactoryDroidPlugin(outputDir, {
+    sourceConfigDir: join(configDir, "cli", "config"),
+    cliDir: join(configDir, "cli"),
+    clean: true,
+  });
+  success(`Factory Droid plugin package exported to: ${result.outputDir}`);
+  const factoryConfig = syncFactoryDroidPersonalConfig(join(homedir(), ".factory"), {
+    sourceConfigDir: join(configDir, "cli", "config"),
+    cliDir: join(configDir, "cli"),
+    pluginDir: result.pluginDir,
+  });
+  success(`Factory Droid personal config synced to: ${factoryConfig.configDir}`);
+  info(`Droids: ${factoryConfig.droids}; skills: ${factoryConfig.skills}; MCP servers: ${factoryConfig.mcpServers.join(", ")}`);
+  for (const backup of factoryConfig.backups) info(`Factory Droid backup created: ${backup}`);
+  for (const warning of factoryConfig.warnings) warn(warning);
+
+  if (!(await commandAvailable("droid"))) {
+    printDroidInstallInstructions();
+    return;
+  }
+
+  info("Installing/updating Factory Droid plugin...");
+  const add = await runCommand("droid", ["plugin", "marketplace", "add", result.outputDir]);
+  if (add.code !== 0) warn(`Droid marketplace add reported: ${add.output || `exit ${add.code}`}. Continuing in case it already exists.`);
+  const installResult = await runCommand("droid", ["plugin", "install", `${result.pluginName}@${result.marketplaceName}`]);
+  if (installResult.code === 0) success("Factory Droid plugin installed/updated.");
+  else if (/already installed/i.test(installResult.output)) {
+    const updateResult = await runCommand("droid", ["plugin", "update", `${result.pluginName}@${result.marketplaceName}`]);
+    if (updateResult.code === 0) success("Factory Droid plugin already installed; updated existing install.");
+    else warn(`Factory Droid plugin update failed: ${updateResult.output || `exit ${updateResult.code}`}`);
+  } else warn(`Factory Droid plugin install failed: ${installResult.output || `exit ${installResult.code}`}`);
+}
+
+export function planStaleOpenCodeProcessKills(processes: ProcessSnapshot[], currentPid = process.pid): ProcessSnapshot[] {
+  return processes
+    .filter((entry) => entry.pid > 0 && entry.pid !== currentPid)
+    .filter((entry) => isStaleOpenCodeCommand(entry.command));
+}
+
+function parseUnixProcessList(output: string): ProcessSnapshot[] {
+  return output.split(/\r?\n/).map((line) => {
+    const match = line.trim().match(/^(\d+)\s+(\d+)\s+(.+)$/);
+    if (!match) return undefined;
+    return { pid: Number(match[1]), ppid: Number(match[2]), command: match[3] ?? "" };
+  }).filter((entry): entry is ProcessSnapshot => Boolean(entry));
+}
+
+async function listUnixProcesses(): Promise<ProcessSnapshot[]> {
+  const proc = Bun.spawn(["ps", "-axo", "pid=,ppid=,command="], { stdout: "pipe", stderr: "pipe" });
+  const [exitCode, stdout] = await Promise.all([proc.exited, new Response(proc.stdout).text()]);
+  if (exitCode !== 0) return [];
+  return parseUnixProcessList(stdout);
+}
+
+async function terminateStaleOpenCodeProcesses(): Promise<ProcessSnapshot[]> {
+  if (process.env.OPENCODE_JCE_SKIP_PROCESS_CLEANUP === "1") return [];
+  if (process.platform === "win32") return [];
+  const targets = planStaleOpenCodeProcessKills(await listUnixProcesses());
+  for (const target of targets) {
+    try { process.kill(target.pid, "SIGTERM"); } catch { /* Process may already have exited. */ }
+  }
+  return targets;
+}
+
+// ─── Types ───────────────────────────────────────────────────
+
+interface RemotePackageJson {
+  version: string;
+}
+
+interface GitHubContentEntry {
+  name: string;
+  type: string;
+  path: string;
+}
+
+interface MergeStats {
+  opencodeJsonChanged: boolean;
+  tuiJsonChanged: boolean;
+  agents: number;
+  mcpServers: number;
+  lspEntries: number;
+  profiles: number;
+  prompts: number;
+  skills: number;
+  agentsMdUpdated: boolean;
+  fallbackSkipped: boolean;
+  fallbackFetchFailed: boolean;
+  fetchFailed: number;
+  fetchAttempted: number;
+}
+
+type FallbackStatus = "written" | "skipped" | "fetch-failed";
+
+interface DirectoryMergeResult {
+  added: number;
+  failed: number;
+  listingFailed: boolean;
+}
+
+// ─── GitHub Fetch Helpers ────────────────────────────────────
+
+/**
+ * Fetch the latest version from GitHub.
+ */
+async function fetchLatestVersion(): Promise<string | null> {
+  try {
+    const response = await fetch(`${GITHUB_RAW_BASE}/package.json`, {
+      signal: AbortSignal.timeout(15000),
+    });
+    if (!response.ok) {
+      return null;
+    }
+    const data = (await response.json()) as RemotePackageJson;
+    return data.version || null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Fetch a raw file from the config directory on GitHub.
+ */
+async function fetchRemoteFile(relativePath: string): Promise<string | null> {
+  try {
+    const url = `${GITHUB_RAW_BASE}/config/${relativePath}`;
+    const response = await fetch(url, {
+      signal: AbortSignal.timeout(15000),
+    });
+    if (!response.ok) {
+      return null;
+    }
+    return await response.text();
+  } catch {
+    return null;
+  }
+}
+
+async function readSourceConfigFile(configDir: string, relativePath: string): Promise<string | null> {
+  const localPath = join(configDir, "cli", "config", relativePath);
+  if (existsSync(localPath)) return await readFile(localPath, "utf-8");
+  return fetchRemoteFile(relativePath);
+}
+
+/**
+ * Fetch the list of files in a directory from the GitHub repository.
+ * Returns an array of filenames.
+ */
+async function fetchDirectoryListing(dir: string): Promise<string[]> {
+  try {
+    const response = await fetch(
+      `https://api.github.com/repos/${GITHUB_REPO}/contents/config/${dir}`,
+      {
+        headers: { Accept: "application/vnd.github.v3+json" },
+        signal: AbortSignal.timeout(15000),
+      }
+    );
+    if (!response.ok) {
+      return [];
+    }
+    const files = (await response.json()) as GitHubContentEntry[];
+    return files
+      .filter((f) => f.type === "file")
+      .map((f) => f.name);
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * Fetch the list of subdirectories in a directory from the GitHub repository.
+ */
+async function fetchSubdirectoryListing(dir: string): Promise<string[]> {
+  try {
+    const response = await fetch(
+      `https://api.github.com/repos/${GITHUB_REPO}/contents/config/${dir}`,
+      {
+        headers: { Accept: "application/vnd.github.v3+json" },
+        signal: AbortSignal.timeout(15000),
+      }
+    );
+    if (!response.ok) {
+      return [];
+    }
+    const entries = (await response.json()) as GitHubContentEntry[];
+    return entries
+      .filter((f) => f.type === "dir")
+      .map((f) => f.name);
+  } catch {
+    return [];
+  }
+}
+
+// ─── Self-Update CLI ─────────────────────────────────────────
+
+/**
+ * Update the rsy-opencode-tools CLI itself to the latest version.
+ * 1. Clones the latest source from GitHub into ~/.config/opencode/cli/
+ * 2. Ensures the .cmd shim points to the updated local CLI folder
+ * 3. Removes any .exe that bun may have created (which would take precedence over .cmd)
+ * Returns true if the CLI was updated successfully.
+ */
+async function selfUpdateCli(latestVersion: string): Promise<boolean> {
+  if (VERSION === latestVersion) {
+    info("Syncing CLI to latest build...");
+  } else {
+    info(`Updating CLI: ${VERSION} → ${latestVersion}...`);
+  }
+
+  try {
+    await updateLocalCliFolder(latestVersion);
+    await ensureCliShim();
+    success(`CLI updated to v${latestVersion}.`);
+    return true;
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    warn(`CLI self-update failed: ${msg}`);
+    warn("Try running the installer again to fix.");
+    return false;
+  }
+}
+
+async function handoffToUpdatedCli(): Promise<never> {
+  info("Restarting update with the freshly updated CLI...");
+  const proc = Bun.spawn(resolveHandoffCommand(), {
+    stdout: "inherit",
+    stderr: "inherit",
+    env: {
+      ...process.env,
+      OPENCODE_JCE_UPDATED_CLI_HANDOFF: "1",
+    },
+  });
+  const exitCode = await proc.exited;
+  process.exit(exitCode);
+}
+
+function resolveHandoffCommand(): string[] {
+  const resolvedShim = Bun.which("rsy-opencode-tools");
+  if (resolvedShim) return [resolvedShim, "update"];
+  return ["bun", "run", join(getConfigDir(), "cli", "src", "index.ts"), "--", "update"];
+}
+
+/**
+ * Fetch the commit SHA for a git ref (tag or branch) from GitHub.
+ * Returns null if the ref doesn't exist or fetch fails.
+ */
+export async function fetchRefSha(repo: string, ref: string): Promise<string | null> {
+  try {
+    const proc = Bun.spawn(
+      ["git", "ls-remote", `https://github.com/${repo}.git`, `refs/tags/${ref}`, `refs/tags/${ref}^{}`, `refs/heads/${ref}`],
+      { stdout: "pipe", stderr: "pipe" }
+    );
+    const [exitCode, stdout] = await Promise.all([proc.exited, new Response(proc.stdout).text()]);
+    if (exitCode !== 0) return null;
+
+    const refs = stdout
+      .trim()
+      .split("\n")
+      .filter(Boolean)
+      .map((line) => {
+        const [sha, name] = line.split(/\s+/);
+        return { sha, name };
+      })
+      .filter((entry) => entry.sha && entry.name && /^[0-9a-f]{40}$/i.test(entry.sha));
+
+    const branchRef = `refs/heads/${ref}`;
+    const peeledTagRef = `refs/tags/${ref}^{}`;
+    const tagRef = `refs/tags/${ref}`;
+
+    return refs.find((entry) => entry.name === branchRef)?.sha
+      ?? refs.find((entry) => entry.name === peeledTagRef)?.sha
+      ?? refs.find((entry) => entry.name === tagRef)?.sha
+      ?? null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Verify the cloned repository is at the expected commit SHA.
+ * Prevents TOCTOU attacks between ref fetch and git clone.
+ */
+async function verifyClonedRepoSha(cloneDir: string, expectedSha: string): Promise<boolean> {
+  try {
+    const proc = Bun.spawn(
+      ["git", "-C", cloneDir, "rev-parse", "HEAD"],
+      { stdout: "pipe", stderr: "pipe" }
+    );
+    const [exitCode, stdout] = await Promise.all([proc.exited, new Response(proc.stdout).text()]);
+    if (exitCode !== 0) return false;
+    
+    const actualSha = stdout.trim();
+    return actualSha === expectedSha;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Update the local cli/ folder in the config directory.
+ * Clones the latest source from GitHub, copies src/, schemas/, package.json,
+ * tsconfig.json, and installs dependencies.
+ * Throws on failure so selfUpdateCli can report it.
+ */
+async function updateLocalCliFolder(latestVersion: string): Promise<void> {
+  const configDir = getConfigDir();
+  const cliDir = join(configDir, "cli");
+
+  info("Downloading latest CLI source...");
+
+  // Clone to temp, copy relevant files
+  const tempDir = join(configDir, ".cli-update-tmp");
+
+  const stagingDir = join(configDir, ".cli-update-new");
+  const backupDir = join(configDir, ".cli-update-backup");
+  try {
+    // Clean up any previous temp
+    if (existsSync(tempDir)) {
+      await rm(tempDir, { recursive: true, force: true });
+    }
+
+    // Clone latest — try tag first, fallback to main branch
+    const releaseRef = `v${latestVersion}`;
+    let cloneRef = releaseRef;
+    
+    // Fetch expected SHA before clone (TOCTOU protection)
+    let expectedSha = await fetchRefSha(GITHUB_REPO, releaseRef);
+    let cloneProc = Bun.spawn(
+      ["git", "clone", "--depth", "1", "--branch", cloneRef, `https://github.com/${GITHUB_REPO}.git`, tempDir],
+      { stdout: "pipe", stderr: "pipe" }
+    );
+    let cloneExit = await cloneProc.exited;
+
+    // If tag clone fails, try main branch (tag might not be updated yet)
+    if (cloneExit !== 0) {
+      if (existsSync(tempDir)) await rm(tempDir, { recursive: true, force: true });
+      cloneRef = "main";
+      expectedSha = await fetchRefSha(GITHUB_REPO, cloneRef);
+      cloneProc = Bun.spawn(
+        ["git", "clone", "--depth", "1", "--branch", cloneRef, `https://github.com/${GITHUB_REPO}.git`, tempDir],
+        { stdout: "pipe", stderr: "pipe" }
+      );
+      cloneExit = await cloneProc.exited;
+    }
+
+    if (cloneExit !== 0) {
+      const stderr = await new Response(cloneProc.stderr).text();
+      throw new Error(`Could not clone release ${releaseRef} or main from GitHub.${stderr ? ` ${stderr}` : ""}`);
+    }
+
+    // Verify cloned repo matches expected commit (integrity check)
+    if (expectedSha) {
+      const verified = await verifyClonedRepoSha(tempDir, expectedSha);
+      if (!verified) {
+        await rm(tempDir, { recursive: true, force: true });
+        throw new Error(`Integrity check failed: cloned repository does not match expected commit ${expectedSha.slice(0, 7)}`);
+      }
+      info(`Integrity verified: ${cloneRef} @ ${expectedSha.slice(0, 7)}`);
+    } else {
+      warn("Could not verify commit integrity — proceeding without SHA check");
+    }
+
+    for (const dir of [stagingDir, backupDir]) {
+      if (existsSync(dir)) {
+        await rm(dir, { recursive: true, force: true });
+      }
+    }
+    await mkdir(stagingDir, { recursive: true });
+
+    // Copy new files into staging first. The active CLI is not touched until
+    // dependencies are installed and all required source files are present.
+    await cp(join(tempDir, "src"), join(stagingDir, "src"), { recursive: true });
+    await cp(join(tempDir, "schemas"), join(stagingDir, "schemas"), { recursive: true });
+    if (existsSync(join(tempDir, "scripts"))) {
+      await cp(join(tempDir, "scripts"), join(stagingDir, "scripts"), { recursive: true });
+    }
+    if (existsSync(join(tempDir, "config"))) {
+      await cp(join(tempDir, "config"), join(stagingDir, "config"), { recursive: true });
+    }
+
+    for (const file of ["package.json", "tsconfig.json", "bun.lock"]) {
+      const src = join(tempDir, file);
+      if (existsSync(src)) {
+        const content = await readFile(src, "utf-8");
+        await writeTextFile(join(stagingDir, file), content);
+      }
+    }
+
+    assertCliPayloadComplete(stagingDir);
+
+    // Install dependencies
+    const installProc = Bun.spawn(
+      ["bun", "install", "--ignore-scripts"],
+      { stdout: "pipe", stderr: "pipe", cwd: stagingDir }
+    );
+    const installExit = await installProc.exited;
+    if (installExit !== 0) {
+      const stderr = await new Response(installProc.stderr).text();
+      throw new Error(`bun install --ignore-scripts failed while updating CLI dependencies.${stderr ? ` ${stderr}` : ""}`);
+    }
+
+    try {
+      if (existsSync(cliDir)) {
+        await retryFs("backup existing CLI directory", () => rename(cliDir, backupDir));
+      }
+      try {
+        await retryFs("activate staged CLI directory", () => rename(stagingDir, cliDir));
+      } catch (err) {
+        if (!existsSync(cliDir) && existsSync(backupDir)) {
+          await retryFs("restore previous CLI directory", () => rename(backupDir, cliDir));
+        }
+        throw err;
+      }
+      if (existsSync(backupDir)) {
+        await rm(backupDir, { recursive: true, force: true });
+      }
+    } catch (err) {
+      if (!existsSync(cliDir) && existsSync(backupDir)) {
+        await retryFs("restore previous CLI directory", () => rename(backupDir, cliDir));
+      }
+      if (!existsSync(join(cliDir, "src", "index.ts"))) {
+        throw new Error(`CLI update rollback left install incomplete. Restore manually from ${backupDir}. Cause: ${err instanceof Error ? err.message : String(err)}`);
+      }
+      throw err;
+    }
+  } finally {
+    await rm(tempDir, { recursive: true, force: true });
+    await rm(stagingDir, { recursive: true, force: true });
+  }
+
+  success("CLI source updated.");
+}
+
+/**
+ * Ensure the CLI shim (.cmd) is correct and remove any .exe that would
+ * take precedence on Windows. The .exe is created by `bun install -g` but
+ * points to stale code in bun's global cache instead of our local cli/ folder.
+ */
+export async function ensureCliShim(): Promise<void> {
+  const configDir = getConfigDir();
+  const cliDir = join(configDir, "cli");
+  const bunBinDir = join(process.env.USERPROFILE || process.env.HOME || "", ".bun", "bin");
+
+  if (!existsSync(bunBinDir)) {
+    await mkdir(bunBinDir, { recursive: true });
+  }
+
+  const isWindows = platform() === "win32";
+  let npmBinDir: string | null = null;
+  if (!isWindows) {
+    try {
+      const npmBinProc = Bun.spawn(["npm", "bin", "-g"], { stdout: "pipe", stderr: "pipe" });
+      if (await npmBinProc.exited === 0) {
+        npmBinDir = (await new Response(npmBinProc.stdout).text()).trim() || null;
+      }
+    } catch {
+      npmBinDir = null;
+    }
+  }
+  const staleFiles = isWindows
+    ? ["rsy-opencode-tools", "rsy-opencode-tools.cmd", "rsy-opencode-tools.ps1", "opencode-jce", "opencode-jce.cmd", "opencode-jce.ps1", "opencode-jce.exe", "opencode-jce.bunx"]
+    : ["rsy-opencode-tools", "opencode-jce", "opencode-jce.cmd", "opencode-jce.exe", "opencode-jce.bunx"];
+  const staleDirs = isWindows
+    ? [bunBinDir, join(process.env.APPDATA || "", "npm")]
+    : [bunBinDir, npmBinDir].filter(Boolean);
+
+  for (const dir of staleDirs) {
+    if (!dir) continue;
+    for (const file of staleFiles) {
+      const filePath = join(dir, file);
+      if (existsSync(filePath)) {
+        await rm(filePath, { force: true });
+      }
+    }
+  }
+
+  if (isWindows) {
+    const cmdPath = join(bunBinDir, "rsy-opencode-tools.cmd");
+    const cmdContent = `@echo off\r\nbun run "${join(cliDir, "src", "index.ts")}" -- %*`;
+    await writeFile(cmdPath, cmdContent, "ascii");
+  } else {
+    const shimPath = join(bunBinDir, "rsy-opencode-tools");
+    const shimContent = `#!/usr/bin/env sh\nexec bun run "${join(cliDir, "src", "index.ts")}" "$@"\n`;
+    await writeFile(shimPath, shimContent, "utf-8");
+    await chmod(shimPath, 0o755);
+  }
+
+  info("CLI shim updated.");
+}
+
+// ─── Local File Helpers ──────────────────────────────────────
+
+/**
+ * Read and parse a local JSON file. Returns null if it doesn't exist or can't be parsed.
+ */
+async function readLocalJson<T>(filePath: string): Promise<T | null> {
+  if (!existsSync(filePath)) {
+    return null;
+  }
+  try {
+    const content = await readFile(filePath, "utf-8");
+    return JSON.parse(content) as T;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Write a JSON object to a file with pretty formatting.
+ */
+async function writeJson(filePath: string, data: unknown): Promise<void> {
+  const dir = dirname(filePath);
+  if (!existsSync(dir)) {
+    await mkdir(dir, { recursive: true });
+  }
+  await writeFile(filePath, JSON.stringify(data, null, 2) + "\n", "utf-8");
+}
+
+/**
+ * Write a string to a file, creating parent directories if needed.
+ */
+async function writeTextFile(filePath: string, content: string): Promise<void> {
+  const dir = dirname(filePath);
+  if (!existsSync(dir)) {
+    await mkdir(dir, { recursive: true });
+  }
+  await writeFile(filePath, content, "utf-8");
+}
+
+// ─── Merge Logic ─────────────────────────────────────────────
+
+/**
+ * Merge agents.json: add new agents by ID, skip existing ones.
+ * Returns the number of new agents added.
+ */
+async function mergeAgents(configDir: string): Promise<number> {
+  const localPath = join(configDir, "agents.json");
+  const remoteContent = await readSourceConfigFile(configDir, "agents.json");
+  if (!remoteContent) return -1;
+
+  let remoteData: { agents: Array<{ id: string; [key: string]: unknown }> };
+  try {
+    remoteData = JSON.parse(remoteContent);
+  } catch {
+    return 0;
+  }
+
+  if (!remoteData.agents || !Array.isArray(remoteData.agents)) return 0;
+
+  const localData = await readLocalJson<{ agents: Array<{ id: string; [key: string]: unknown }> }>(localPath);
+  const localAgents = localData?.agents ?? [];
+  const localIds = new Set(localAgents.map((a) => a.id));
+
+  const newAgents = remoteData.agents.filter((a) => !localIds.has(a.id));
+  if (newAgents.length === 0 && localAgents.length > 0) return 0;
+
+  const mergedAgents = [...localAgents, ...newAgents];
+  await writeJson(localPath, { agents: mergedAgents });
+  return newAgents.length;
+}
+
+/**
+ * Merge mcp.json: add new MCP servers by key, skip existing ones.
+ * Returns the number of new servers added.
+ */
+async function mergeMcpServers(configDir: string): Promise<number> {
+  const localPath = join(configDir, "mcp.json");
+  const remoteContent = await readSourceConfigFile(configDir, "mcp.json");
+  if (!remoteContent) return -1;
+
+  let remoteData: { mcpServers: Record<string, unknown> };
+  try {
+    remoteData = JSON.parse(remoteContent);
+  } catch {
+    return 0;
+  }
+
+  if (!remoteData.mcpServers || typeof remoteData.mcpServers !== "object") return 0;
+
+  const localData = await readLocalJson<{ mcpServers: Record<string, unknown> }>(localPath);
+  const localServers = localData?.mcpServers ?? {};
+
+  let addedCount = 0;
+  const merged = { ...localServers };
+
+  for (const [key, value] of Object.entries(remoteData.mcpServers)) {
+    if (!(key in merged)) {
+      merged[key] = value;
+      addedCount++;
+    }
+  }
+
+  if (addedCount === 0 && Object.keys(localServers).length > 0) return 0;
+
+  await writeJson(localPath, { mcpServers: merged });
+  return addedCount;
+}
+
+/**
+ * Merge lsp.json: add new LSP entries by key, skip existing ones.
+ * Returns the number of new entries added.
+ */
+async function mergeLspEntries(configDir: string): Promise<number> {
+  const localPath = join(configDir, "lsp.json");
+  const remoteContent = await readSourceConfigFile(configDir, "lsp.json");
+  if (!remoteContent) return -1;
+
+  let remoteData: { lsp: Record<string, unknown> };
+  try {
+    remoteData = JSON.parse(remoteContent);
+  } catch {
+    return 0;
+  }
+
+  if (!remoteData.lsp || typeof remoteData.lsp !== "object") return 0;
+
+  const localData = await readLocalJson<{ lsp: Record<string, unknown> }>(localPath);
+  const localLsp = localData?.lsp ?? {};
+
+  let addedCount = 0;
+  const merged = { ...localLsp };
+
+  for (const [key, value] of Object.entries(remoteData.lsp)) {
+    if (!(key in merged)) {
+      merged[key] = value;
+      addedCount++;
+    }
+  }
+
+  if (addedCount === 0 && Object.keys(localLsp).length > 0) return 0;
+
+  await writeJson(localPath, { lsp: merged });
+  return addedCount;
+}
+
+/**
+ * Merge a directory: copy new files only, skip existing filenames.
+ * Returns the number of new files added.
+ */
+async function mergeDirectory(configDir: string, dirName: string): Promise<DirectoryMergeResult> {
+  const localDir = join(configDir, dirName);
+  const sourceDir = join(configDir, "cli", "config", dirName);
+  if (existsSync(sourceDir)) {
+    if (!existsSync(localDir)) await mkdir(localDir, { recursive: true });
+    let added = 0;
+    for (const fileName of readdirSync(sourceDir)) {
+      const sourcePath = join(sourceDir, fileName);
+      const targetPath = join(localDir, fileName);
+      if (existsSync(targetPath)) continue;
+      await cp(sourcePath, targetPath, { recursive: true });
+      added++;
+    }
+    return { added, failed: 0, listingFailed: false };
+  }
+  const remoteFiles = await fetchDirectoryListing(dirName);
+  // Distinguish fetch failure from genuinely empty directory via HTTP status
+  if (remoteFiles.length === 0) {
+    const hasLocalFiles = existsSync(localDir) && readdirSync(localDir).length > 0;
+    // Try a HEAD check to confirm the API responded (empty dir vs fetch failure)
+    try {
+      const response = await fetch(
+        `https://api.github.com/repos/${GITHUB_REPO}/contents/config/${dirName}`,
+        { method: "HEAD", signal: AbortSignal.timeout(15000) }
+      );
+      const fetchFailed = !response.ok;
+      return { added: 0, failed: 0, listingFailed: fetchFailed };
+    } catch {
+      return { added: 0, failed: 0, listingFailed: !hasLocalFiles };
+    }
+  }
+
+  if (!existsSync(localDir)) {
+    await mkdir(localDir, { recursive: true });
+  }
+
+  let addedCount = 0;
+  let failedCount = 0;
+
+  for (const fileName of remoteFiles) {
+    const localPath = join(localDir, fileName);
+    if (existsSync(localPath)) {
+      continue; // Skip existing files
+    }
+
+    const content = await fetchRemoteFile(`${dirName}/${fileName}`);
+    if (content) {
+      await writeTextFile(localPath, content);
+      addedCount++;
+    } else {
+      failedCount++;
+    }
+  }
+
+  return { added: addedCount, failed: failedCount, listingFailed: false };
+}
+
+/**
+ * Merge skill directories: each skill is a subdirectory containing SKILL.md.
+ * Uses the locally cloned CLI source (already downloaded in Step 1) to avoid
+ * GitHub API rate limits. Falls back to API if local source unavailable.
+ */
+async function mergeSkillDirectories(configDir: string): Promise<DirectoryMergeResult> {
+  const localDir = join(configDir, "skills");
+  const cliSkillsDir = join(configDir, "cli", "config", "skills");
+
+  // Try local source first (from the CLI clone in Step 1)
+  if (existsSync(cliSkillsDir)) {
+    return mergeSkillsFromLocal(localDir, cliSkillsDir);
+  }
+
+  // Fallback: fetch from GitHub API (may hit rate limits for 50+ skills)
+  return mergeSkillsFromApi(localDir);
+}
+
+async function mergeSkillsFromLocal(localDir: string, sourceDir: string): Promise<DirectoryMergeResult> {
+  if (!existsSync(localDir)) {
+    await mkdir(localDir, { recursive: true });
+  }
+
+  let addedCount = 0;
+  const entries = readdirSync(sourceDir);
+
+  for (const entry of entries) {
+    const sourcePath = join(sourceDir, entry);
+    const destPath = join(localDir, entry);
+
+    // Only process directories that contain SKILL.md
+    const sourceSkillPath = join(sourcePath, "SKILL.md");
+    const destSkillPath = join(destPath, "SKILL.md");
+    if (!existsSync(sourceSkillPath)) continue;
+    if (existsSync(destPath)) {
+      const sourceContent = await readFile(sourceSkillPath, "utf-8");
+      const destContent = existsSync(destSkillPath) ? await readFile(destSkillPath, "utf-8") : "";
+      if (sourceContent === destContent) continue;
+      const timestamp = new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19);
+      if (destContent) await writeTextFile(join(destPath, `SKILL.md.backup.${timestamp}`), destContent);
+      await cp(sourcePath, destPath, { recursive: true, force: true });
+      addedCount++;
+      continue;
+    }
+
+    await cp(sourcePath, destPath, { recursive: true });
+    addedCount++;
+  }
+
+  return { added: addedCount, failed: 0, listingFailed: false };
+}
+
+async function mergeSkillsFromApi(localDir: string): Promise<DirectoryMergeResult> {
+  const remoteSkills = await fetchSubdirectoryListing("skills");
+  if (remoteSkills.length === 0) {
+    if (!existsSync(localDir) || readdirSync(localDir).length === 0) {
+      return { added: 0, failed: 0, listingFailed: true };
+    }
+    return { added: 0, failed: 0, listingFailed: false };
+  }
+
+  if (!existsSync(localDir)) {
+    await mkdir(localDir, { recursive: true });
+  }
+
+  let addedCount = 0;
+  let failedCount = 0;
+
+  for (const skillName of remoteSkills) {
+    const localSkillDir = join(localDir, skillName);
+
+    const skillFiles = await fetchDirectoryListing(`skills/${skillName}`);
+    if (skillFiles.length === 0) {
+      failedCount++;
+      continue;
+    }
+
+    await mkdir(localSkillDir, { recursive: true });
+    let skillAdded = false;
+
+    for (const fileName of skillFiles) {
+      const content = await fetchRemoteFile(`skills/${skillName}/${fileName}`);
+      if (content) {
+        const targetPath = join(localSkillDir, fileName);
+        if (existsSync(targetPath)) {
+          const existing = await readFile(targetPath, "utf-8");
+          if (existing === content) continue;
+          const timestamp = new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19);
+          await writeTextFile(join(localSkillDir, `${fileName}.backup.${timestamp}`), existing);
+        }
+        await writeTextFile(targetPath, content);
+        skillAdded = true;
+      }
+    }
+
+    if (skillAdded) {
+      addedCount++;
+    } else {
+      failedCount++;
+      await rm(localSkillDir, { recursive: true, force: true });
+    }
+  }
+
+  return { added: addedCount, failed: failedCount, listingFailed: false };
+}
+
+/**
+ * Handle AGENTS.md: always overwrite (system instruction must be latest).
+ * Returns true if updated.
+ */
+async function updateAgentsMd(configDir: string): Promise<boolean> {
+  const content = await readSourceConfigFile(configDir, "AGENTS.md");
+  if (!content) return false;
+
+  const localPath = join(configDir, "AGENTS.md");
+
+  // Preserve user edits: backup before overwriting
+  if (existsSync(localPath)) {
+    const localContent = await readFile(localPath, "utf-8");
+    if (localContent !== content) {
+      const timestamp = new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19);
+      const backupPath = join(configDir, `AGENTS.md.backup.${timestamp}`);
+      await writeTextFile(backupPath, localContent);
+      info(`  AGENTS.md changed — backup saved to ${backupPath}`);
+    }
+  }
+
+  await writeTextFile(localPath, content);
+  return true;
+}
+
+/**
+ * Handle fallback.json: skip if already exists (user may have customized).
+ * Returns true if the file was written (i.e., it didn't exist before).
+ */
+async function handleFallback(configDir: string): Promise<FallbackStatus> {
+  const localPath = join(configDir, "fallback.json");
+  if (existsSync(localPath)) {
+    return "skipped"; // Skip — user may have customized
+  }
+
+  const content = await readSourceConfigFile(configDir, "fallback.json");
+  if (!content) return "fetch-failed";
+
+  await writeTextFile(localPath, content);
+  return "written";
+}
+
+/**
+ * Ensure OpenCode's primary config exists before migrations register MCP/LSP.
+ */
+async function ensureOpenCodeJson(configDir: string): Promise<boolean> {
+  try {
+    const result = ensureOpenCodeJsonEntries(configDir);
+    if (result.tidied && result.backupPath) {
+      warn(`Tidied & reformatted opencode.json (recoverable syntax — e.g. BOM or trailing commas). All settings preserved; original backed up to ${result.backupPath}.`);
+    } else if (result.repaired && result.backupPath) {
+      warn(`Malformed opencode.json was backed up to ${result.backupPath} and rebuilt.`);
+    }
+    return result.changed;
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    warn(msg);
+    warn("Preserved existing opencode.json unchanged. Fix the JSON syntax, then rerun `rsy-opencode-tools update`.");
+    logCommandError("update", `opencode.json merge refused: ${msg}`);
+    return false;
+  }
+}
+
+async function ensureTuiJson(configDir: string): Promise<boolean> {
+  const result = ensureTuiJsonEntries(configDir);
+  if (result.repaired && result.backupPath) {
+    warn(`Malformed tui.json was backed up to ${result.backupPath} and rebuilt.`);
+  }
+  return result.changed;
+}
+
+async function backupConfigForUpdate(configDir: string): Promise<void> {
+  if (!existsSync(configDir)) return;
+  const backupDir = join(configDir, ".backup-update");
+  
+  // Clean old backup if exists
+  if (existsSync(backupDir)) {
+    await rm(backupDir, { recursive: true, force: true });
+  }
+  
+  await mkdir(backupDir, { recursive: true });
+  
+  // Backup all critical config files that could be modified during update
+  const filesToBackup = ["opencode.json", "tui.json", "agents.json", "mcp.json", "lsp.json", "fallback.json"];
+  for (const file of filesToBackup) {
+    const src = join(configDir, file);
+    const dst = join(backupDir, file);
+    if (existsSync(src)) {
+      await cp(src, dst, { force: true });
+    }
+  }
+  
+  info(`Backed up config to: ${backupDir}`);
+}
+
+// ─── Main Merge Orchestrator ─────────────────────────────────
+
+/**
+ * Perform a merge-based update: fetch remote configs and merge them
+ * with local configs, preserving user customizations.
+ */
+async function mergeUpdatedConfigs(): Promise<MergeStats> {
+  const configDir = getConfigDir();
+
+  // Ensure config directory exists
+  if (!existsSync(configDir)) {
+    await mkdir(configDir, { recursive: true });
+  }
+
+  const stats: MergeStats = {
+    opencodeJsonChanged: false,
+    tuiJsonChanged: false,
+    agents: 0,
+    mcpServers: 0,
+    lspEntries: 0,
+    profiles: 0,
+    prompts: 0,
+    skills: 0,
+    agentsMdUpdated: false,
+    fallbackSkipped: false,
+    fallbackFetchFailed: false,
+    fetchFailed: 0,
+    fetchAttempted: 0,
+  };
+
+  // 1. Merge JSON config files
+  info("Ensuring opencode.json...");
+  stats.opencodeJsonChanged = await ensureOpenCodeJson(configDir);
+
+  info("Ensuring tui.json...");
+  stats.tuiJsonChanged = await ensureTuiJson(configDir);
+
+  info("Merging agents.json...");
+  stats.fetchAttempted++;
+  stats.agents = await mergeAgents(configDir);
+  if (stats.agents < 0) { stats.fetchFailed++; stats.agents = 0; }
+
+  info("Merging mcp.json...");
+  stats.fetchAttempted++;
+  stats.mcpServers = await mergeMcpServers(configDir);
+  if (stats.mcpServers < 0) { stats.fetchFailed++; stats.mcpServers = 0; }
+
+  info("Merging lsp.json...");
+  stats.fetchAttempted++;
+  stats.lspEntries = await mergeLspEntries(configDir);
+  if (stats.lspEntries < 0) { stats.fetchFailed++; stats.lspEntries = 0; }
+
+  // 2. Merge directories (only add new files)
+  info("Merging profiles/...");
+  stats.fetchAttempted++;
+  const profileMerge = await mergeDirectory(configDir, "profiles");
+  stats.profiles = profileMerge.added;
+  if (profileMerge.listingFailed) stats.fetchFailed++;
+  stats.fetchFailed += profileMerge.failed;
+  stats.fetchAttempted += profileMerge.added + profileMerge.failed;
+
+  info("Merging prompts/...");
+  stats.fetchAttempted++;
+  const promptMerge = await mergeDirectory(configDir, "prompts");
+  stats.prompts = promptMerge.added;
+  if (promptMerge.listingFailed) stats.fetchFailed++;
+  stats.fetchFailed += promptMerge.failed;
+  stats.fetchAttempted += promptMerge.added + promptMerge.failed;
+
+  info("Merging commands/...");
+  stats.fetchAttempted++;
+  const commandMerge = await mergeDirectory(configDir, "commands");
+  if (commandMerge.listingFailed) stats.fetchFailed++;
+  stats.fetchFailed += commandMerge.failed;
+  stats.fetchAttempted += commandMerge.added + commandMerge.failed;
+  if (commandMerge.added > 0) info(`  +${commandMerge.added} command(s)`);
+
+  info("Merging skills/...");
+  stats.fetchAttempted++;
+  const skillMerge = await mergeSkillDirectories(configDir);
+  stats.skills = skillMerge.added;
+  if (skillMerge.listingFailed) stats.fetchFailed++;
+  stats.fetchFailed += skillMerge.failed;
+  stats.fetchAttempted += skillMerge.added + skillMerge.failed;
+
+  // 3. AGENTS.md — overwrite only if remote is newer, preserve user edits otherwise
+  info("Updating AGENTS.md...");
+  stats.fetchAttempted++;
+  stats.agentsMdUpdated = await updateAgentsMd(configDir);
+  if (!stats.agentsMdUpdated && !existsSync(join(configDir, "AGENTS.md"))) { stats.fetchFailed++; }
+
+  // 4. fallback.json — skip if exists
+  info("Checking fallback.json...");
+  stats.fetchAttempted++;
+  const fallbackStatus = await handleFallback(configDir);
+  stats.fallbackSkipped = fallbackStatus === "skipped";
+  stats.fallbackFetchFailed = fallbackStatus === "fetch-failed";
+  if (fallbackStatus === "fetch-failed") { stats.fetchFailed++; }
+
+  return stats;
+}
+
+// ─── Report ──────────────────────────────────────────────────
+
+/**
+ * Print a human-readable summary of what was merged.
+ */
+function printMergeReport(stats: MergeStats): void {
+  console.log();
+  heading("Merge Summary");
+
+  const items: string[] = [];
+
+  if (stats.agents > 0) items.push(`${stats.agents} agent(s)`);
+  if (stats.mcpServers > 0) items.push(`${stats.mcpServers} MCP server(s)`);
+  if (stats.lspEntries > 0) items.push(`${stats.lspEntries} LSP entry/entries`);
+  if (stats.profiles > 0) items.push(`${stats.profiles} profile(s)`);
+  if (stats.prompts > 0) items.push(`${stats.prompts} prompt(s)`);
+  if (stats.skills > 0) items.push(`${stats.skills} skill(s)`);
+
+  if (items.length > 0) {
+    success(`Added: ${items.join(", ")}`);
+  } else {
+    info("No new items to add — your config already has everything.");
+  }
+
+  if (stats.agentsMdUpdated) {
+    success("AGENTS.md updated to latest version.");
+  }
+
+  if (stats.fallbackSkipped) {
+    info("fallback.json skipped (local copy preserved).");
+  }
+
+  if (stats.opencodeJsonChanged) {
+    success("opencode.json updated with missing defaults.");
+  }
+  if (stats.tuiJsonChanged) {
+    success("tui.json updated with Token Savings TUI plugin defaults.");
+  }
+}
+
+// ─── Command ─────────────────────────────────────────────────
+
+export const updateCommand = new Command("update")
+  .description("Update CLI and merge latest configuration from GitHub")
+  .option("--check", "Only check for updates without applying them")
+  .option("--force", "Force sync even when local version is newer than remote")
+  .action(async (options: { check?: boolean; force?: boolean }) => {
+    logCommandStart("update", options);
+    banner();
+    heading("Update Check");
+
+    // Ensure version file exists
+    await initVersionFile();
+
+    // Use the actual binary version (VERSION) as the authoritative local version.
+    // version.json tracks config schema, but the binary version is what determines
+    // whether the CLI itself needs updating.
+    const localVersion = VERSION;
+
+    info(`Current local version: ${chalk.bold(localVersion)}`);
+
+    // Fetch latest version from GitHub
+    info("Checking for updates...");
+    const latestVersion = await fetchLatestVersion();
+
+    if (!latestVersion) {
+      error("Could not reach GitHub to check for updates.");
+      error("Check your internet connection and try again.");
+      logCommandError("update", "Failed to fetch latest version from GitHub");
+      process.exit(EXIT_ERROR);
+    }
+
+    info(`Latest remote version: ${chalk.bold(latestVersion)}`);
+    console.log();
+
+    const comparison = compareVersions(latestVersion, localVersion);
+    const isHandoff = process.env.OPENCODE_JCE_UPDATED_CLI_HANDOFF === "1";
+
+    if (comparison > 0) {
+      info(`${chalk.yellow("Update available:")} ${localVersion} → ${latestVersion}`);
+    } else if (comparison < 0) {
+      warn(`Local version (${localVersion}) is newer than remote (${latestVersion}).`);
+      if (!options.force) {
+        info("Skipping self-update to avoid downgrading. Use --force only if you intentionally want to sync remote main.");
+      }
+    } else {
+      info("Version is current. Syncing latest files...");
+    }
+
+    // Check-only mode
+    if (options.check) {
+      if (comparison > 0) {
+        info("Run `rsy-opencode-tools update` to apply the update.");
+      } else if (comparison < 0) {
+        info("No update applied because local version is newer than remote.");
+      } else {
+        info("Run `rsy-opencode-tools update` to sync latest files.");
+      }
+      logCommandSuccess("update", `check complete, latest=${latestVersion}`);
+      process.exit(EXIT_SUCCESS);
+    }
+
+    if (comparison < 0 && !options.force) {
+      logCommandSuccess("update", `skipped downgrade, local=${localVersion}, remote=${latestVersion}`);
+      process.exit(EXIT_SUCCESS);
+    }
+
+    const configDir = getConfigDir();
+    try {
+      await backupConfigForUpdate(configDir);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      error(`Backup failed: ${msg}`);
+      error("Update aborted before changing CLI or configuration because no recovery backup could be created.");
+      logCommandError("update", `backup failed: ${msg}`);
+      process.exit(EXIT_ERROR);
+    }
+
+    // Step 1: Self-update CLI
+    console.log();
+    heading("Step 1: Update CLI");
+    const cliUpdated = await selfUpdateCli(latestVersion);
+    if (!cliUpdated) {
+      logCommandError("update", "CLI self-update failed");
+      process.exit(EXIT_ERROR);
+    }
+    if (comparison > 0 && !isHandoff) {
+      await handoffToUpdatedCli();
+    }
+
+    // Step 2: Merge config files
+    console.log();
+    heading("Step 2: Merge Configuration");
+
+    // Merge remote configs into local
+    info("Downloading and merging latest configuration...");
+    const stats = await mergeUpdatedConfigs();
+
+    // Check if anything was actually fetched
+    const totalChanges =
+      stats.agents +
+      stats.mcpServers +
+      stats.lspEntries +
+      stats.profiles +
+      stats.prompts +
+      stats.skills +
+      (stats.agentsMdUpdated ? 1 : 0) +
+      (stats.opencodeJsonChanged ? 1 : 0) +
+      (stats.tuiJsonChanged ? 1 : 0);
+
+    if (stats.fetchFailed > 0) {
+      warn(`${stats.fetchFailed}/${stats.fetchAttempted} fetch(es) failed. Update may have failed.`);
+      warn("Check your internet connection or try again later.");
+      warn("Attempting to restore configuration from backup...");
+      
+      // Rollback all backed-up config files on fetch failure
+      const configDir = getConfigDir();
+      const backupDir = join(configDir, ".backup-update");
+      if (existsSync(backupDir)) {
+        try {
+          const filesToRestore = [
+            "opencode.json",
+            "tui.json",
+            "agents.json",
+            "mcp.json",
+            "lsp.json",
+            "fallback.json",
+          ];
+          for (const file of filesToRestore) {
+            const backupFile = join(backupDir, file);
+            if (existsSync(backupFile)) {
+              await cp(backupFile, join(configDir, file), { force: true });
+              success(`Restored ${file} from backup.`);
+            }
+          }
+          
+          // Also restore AGENTS.md from timestamped backup if it exists
+          const agentsBackups = readdirSync(configDir)
+            .filter((f) => f.startsWith("AGENTS.md.backup."))
+            .sort()
+            .reverse();
+          if (agentsBackups.length > 0) {
+            await cp(
+              join(configDir, agentsBackups[0]),
+              join(configDir, "AGENTS.md"),
+              { force: true }
+            );
+            success("Restored AGENTS.md from backup.");
+          }
+        } catch (rollbackErr) {
+          warn(
+            `Rollback failed: ${
+              rollbackErr instanceof Error
+                ? rollbackErr.message
+                : String(rollbackErr)
+            }`
+          );
+        }
+      }
+      
+      logCommandError("update", `${stats.fetchFailed} fetches failed during merge; config rolled back`);
+      process.exit(EXIT_ERROR);
+    }
+
+    // Print merge report
+    printMergeReport(stats);
+
+    // Run migrations based on version.json state (independent of binary version)
+    console.log();
+    info("Running migrations...");
+    let migrationsRun = 0;
+    try {
+      migrationsRun = await runMigrations(latestVersion || CURRENT_CONFIG_VERSION);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      warn(`Migration skipped/failed without rewriting config: ${msg}`);
+      logCommandError("update", `migration skipped/failed: ${msg}`);
+    }
+    if (migrationsRun > 0) {
+      success(`Ran ${migrationsRun} migration(s).`);
+    } else {
+      info("No migrations needed.");
+    }
+
+    try {
+      await exportAndOfferFactoryDroidInstall(configDir);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      warn(`Factory Droid setup skipped/failed: ${msg}`);
+      warn("Run `rsy-opencode-tools factory export` after update to retry.");
+    }
+
+    // Final summary
+    console.log();
+    heading("Update Complete");
+    if (comparison > 0) {
+      success(`Version: ${localVersion} → ${latestVersion}`);
+    } else {
+      success(`Synced to latest build (v${latestVersion}).`);
+    }
+    const terminated = await terminateStaleOpenCodeProcesses();
+    if (terminated.length > 0) {
+      warn(`Stopped ${terminated.length} stale OpenCode process(es) so the updated plugin/CLI is loaded next run.`);
+    }
+    info("Your existing customizations have been preserved.");
+    info("Run `rsy-opencode-tools doctor` to verify your installation.");
+
+    logCommandSuccess("update", `synced to ${latestVersion}, added ${totalChanges} item(s)`);
+    process.exit(EXIT_SUCCESS);
+  });

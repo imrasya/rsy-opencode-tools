@@ -1,0 +1,104 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Agents Configuration",
+  "type": "object",
+  "required": ["agents"],
+  "properties": {
+    "agents": {
+      "type": "array",
+      "minItems": 1,
+      "uniqueItemProperties": ["id"],
+      "items": {
+        "type": "object",
+        "required": ["id", "name", "role", "systemPrompt", "preferredProfile", "maxTokens", "tools"],
+        "properties": {
+          "id": {
+            "type": "string",
+            "minLength": 1,
+            "pattern": "^[a-z0-9][a-z0-9-]*$"
+          },
+          "name": {
+            "type": "string",
+            "minLength": 1
+          },
+          "role": {
+            "type": "string",
+            "minLength": 1
+          },
+          "systemPrompt": {
+            "type": "string",
+            "minLength": 1
+          },
+          "preferredProfile": {
+            "type": "string",
+            "minLength": 1
+          },
+          "maxTokens": {
+            "type": "integer",
+            "exclusiveMinimum": 0
+          },
+          "model": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Optional OpenCode provider/model override for this agent"
+          },
+          "tools": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "workflow": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Step-by-step execution plan for advanced agents"
+          },
+          "outputFormat": {
+            "type": "string",
+            "description": "Structured response template"
+          },
+          "contextRules": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "string"
+            },
+            "description": "Project-type-specific behavior rules"
+          },
+          "verification": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Self-check steps before responding"
+          },
+          "routing": {
+            "type": "object",
+            "properties": {
+              "fileExtensions": { "type": "array", "items": { "type": "string" } },
+              "errorPatterns": { "type": "array", "items": { "type": "string" } },
+              "projectFiles": { "type": "array", "items": { "type": "string" } },
+              "gitDiffTriggers": { "type": "object" },
+              "failureEscalation": { "type": "boolean" }
+            },
+            "description": "Context-aware auto-dispatch triggers"
+          },
+          "pipeline": {
+            "type": "object",
+            "properties": {
+              "before": { "type": "array", "items": { "type": "string" } },
+              "after": { "type": "array", "items": { "type": "string" } },
+              "escalateTo": { "type": "string" },
+              "delegateTo": { "type": "object" }
+            },
+            "description": "Multi-agent collaboration links"
+          }
+        },
+        "additionalProperties": false
+      },
+      "uniqueItems": true
+    }
+  },
+  "additionalProperties": false
+}

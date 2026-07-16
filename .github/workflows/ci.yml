@@ -1,0 +1,159 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  typecheck:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: "1.3"
+      - uses: actions/cache@v4
+        with:
+          path: ~/.bun/install/cache
+          key: ${{ runner.os }}-bun-${{ hashFiles('bun.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-bun-
+      - run: bun install --frozen-lockfile
+      - run: bun run typecheck
+
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: "1.3"
+      - uses: actions/cache@v4
+        with:
+          path: ~/.bun/install/cache
+          key: ${{ runner.os }}-bun-${{ hashFiles('bun.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-bun-
+      - run: bun install --frozen-lockfile
+      - run: bun test
+
+  test-cli:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: "1.3"
+      - uses: actions/cache@v4
+        with:
+          path: ~/.bun/install/cache
+          key: ${{ runner.os }}-bun-${{ hashFiles('bun.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-bun-
+      - run: bun install --frozen-lockfile
+      - name: CLI --help
+        run: bun ./src/index.ts --help
+      - name: CLI --version
+        run: bun ./src/index.ts --version
+      - name: CLI validate
+        shell: bash
+        run: |
+          bun ./src/index.ts validate || exit_code=$?
+          if [ "${exit_code:-0}" -eq 1 ]; then
+            echo "Expected: config not deployed in CI"
+          elif [ "${exit_code:-0}" -ne 0 ]; then
+            exit "$exit_code"
+          fi
+
+  lint-shell:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check install.sh syntax
+        run: bash -n install.sh
+
+  validate-json:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: "1.3"
+      - uses: actions/cache@v4
+        with:
+          path: ~/.bun/install/cache
+          key: ${{ runner.os }}-bun-${{ hashFiles('bun.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-bun-
+      - run: bun install --frozen-lockfile
+      - name: Validate all JSON configs
+        run: |
+          for f in $(find config schemas -name "*.json"); do
+            echo -n "$f: "
+            bun -e "import fs from 'fs'; JSON.parse(fs.readFileSync('$f','utf8')); console.log('OK')"
+          done
+      - name: Validate schemas
+        run: |
+          bun -e "
+            import Ajv from 'ajv';
+            import fs from 'fs';
+            import path from 'path';
+            const ajv = new Ajv({ strict: false, allErrors: true });
+
+            const checks = [
+              ['schemas/agents.schema.json', 'config/agents.json'],
+              ['schemas/mcp.schema.json', 'config/mcp.json'],
+              ['schemas/lsp.schema.json', 'config/lsp.json'],
+              ['schemas/fallback.schema.json', 'config/fallback.json'],
+            ];
+
+            let failed = false;
+            for (const [schemaFile, dataFile] of checks) {
+              const schema = JSON.parse(fs.readFileSync(schemaFile, 'utf8'));
+              const data = JSON.parse(fs.readFileSync(dataFile, 'utf8'));
+              const validate = ajv.compile(schema);
+              if (!validate(data)) {
+                console.error('FAIL:', dataFile, validate.errors);
+                failed = true;
+              } else {
+                console.log('PASS:', dataFile);
+              }
+            }
+
+            // Enforce unique agent IDs (uniqueItemProperties is not standard JSON Schema)
+            const agentsData = JSON.parse(fs.readFileSync('config/agents.json', 'utf8'));
+            const agentIds = agentsData.agents.map(a => a.id);
+            const duplicateIds = agentIds.filter((id, i) => agentIds.indexOf(id) !== i);
+            if (duplicateIds.length > 0) {
+              console.error('FAIL: Duplicate agent IDs found:', [...new Set(duplicateIds)]);
+              failed = true;
+            } else {
+              console.log('PASS: All agent IDs are unique');
+            }
+
+            // Validate all profiles
+            const profileSchema = JSON.parse(fs.readFileSync('schemas/profile.schema.json', 'utf8'));
+            const validateProfile = ajv.compile(profileSchema);
+            const profileDir = 'config/profiles';
+            for (const f of fs.readdirSync(profileDir)) {
+              if (!f.endsWith('.json')) continue;
+              const data = JSON.parse(fs.readFileSync(path.join(profileDir, f), 'utf8'));
+              if (!validateProfile(data)) {
+                console.error('FAIL:', f, validateProfile.errors);
+                failed = true;
+              } else {
+                console.log('PASS:', f);
+              }
+            }
+
+            if (failed) process.exit(1);
+          "

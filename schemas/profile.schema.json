@@ -1,0 +1,92 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Profile Configuration",
+  "type": "object",
+  "required": ["id", "name", "description", "provider", "temperature", "tokenSaving"],
+  "additionalProperties": false,
+  "properties": {
+    "id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "name": {
+      "type": "string",
+      "minLength": 1
+    },
+    "description": {
+      "type": "string",
+      "minLength": 1
+    },
+    "provider": {
+      "type": "string",
+      "enum": ["openai", "anthropic", "ollama", "auto", "google", "deepseek", "xai", "mistral", "9router"]
+    },
+    "model": {
+      "type": "string",
+      "minLength": 1
+    },
+    "maxTokens": {
+      "type": "integer",
+      "exclusiveMinimum": 0
+    },
+    "temperature": {
+      "type": "number",
+      "minimum": 0,
+      "maximum": 2
+    },
+    "apiKeyEnv": {
+      "type": ["string", "array", "null"]
+    },
+    "endpoint": {
+      "type": "string"
+    },
+    "routing": {
+      "type": "object",
+      "properties": {
+        "simple": {
+          "type": "object",
+          "properties": {
+            "provider": { "type": "string" },
+            "model": { "type": "string" },
+            "maxTokens": { "type": "integer", "exclusiveMinimum": 0 }
+          },
+          "required": ["provider", "model"]
+        },
+        "complex": {
+          "type": "object",
+          "properties": {
+            "provider": { "type": "string" },
+            "model": { "type": "string" },
+            "maxTokens": { "type": "integer", "exclusiveMinimum": 0 }
+          },
+          "required": ["provider", "model"]
+        }
+      }
+    },
+    "tokenSaving": {
+      "type": "object",
+      "required": ["contextTruncation", "maxContextMessages"],
+      "properties": {
+        "contextTruncation": {
+          "type": "boolean"
+        },
+        "maxContextMessages": {
+          "type": "integer",
+          "exclusiveMinimum": 0
+        },
+        "aggressiveSummarization": {
+          "type": "boolean"
+        },
+        "skipSystemPromptRepetition": {
+          "type": "boolean"
+        }
+      }
+    }
+  },
+  "if": {
+    "not": { "properties": { "provider": { "const": "auto" } } }
+  },
+  "then": {
+    "required": ["model", "maxTokens"]
+  }
+}

@@ -1,0 +1,800 @@
+import { Command } from "commander";
+import { existsSync } from "fs";
+import { rm, cp, mkdir } from "fs/promises";
+import { join, resolve, relative, isAbsolute } from "path";
+import { platform } from "os";
+import { createInterface } from "readline";
+import { getConfigDir } from "../lib/config.js";
+import { banner, heading, info, success, warn, error } from "../lib/ui.js";
+import { EXIT_SUCCESS, EXIT_ERROR } from "../types.js";
+
+// ─── MCP Packages (from config/mcp.json) ────────────────────────────────────
+
+const MCP_PACKAGES = [
+  "@upstash/context7-mcp",
+  "@modelcontextprotocol/server-github",
+  "@modelcontextprotocol/server-memory",
+  "@playwright/mcp",
+  "@modelcontextprotocol/server-sequential-thinking",
+] as const;
+
+// ─── LSP Servers (all that the installer can install) ────────────────────────
+
+interface LspServerInfo {
+  name: string;
+  command: string; // Binary name to check if installed
+  /** Uninstall strategies in order of preference. Tries each until one succeeds. */
+  uninstallStrategies: string[][];
+}
+
+/**
+ * Build the LSP server list with platform-appropriate uninstall commands.
+ */
+function buildLspServers(): LspServerInfo[] {
+  const isWindows = platform() === "win32";
+  const home = process.env.USERPROFILE || process.env.HOME || "";
+
+  return [
+    // npm-installed (cross-platform, always works)
+    { name: "Python (pyright)", command: "pyright-langserver", uninstallStrategies: [["npm", "uninstall", "-g", "pyright"]] },
+    { name: "TypeScript", command: "typescript-language-server", uninstallStrategies: [["npm", "uninstall", "-g", "typescript-language-server"]] },
+    { name: "Bash", command: "bash-language-server", uninstallStrategies: [["npm", "uninstall", "-g", "bash-language-server"]] },
+    { name: "YAML", command: "yaml-language-server", uninstallStrategies: [["npm", "uninstall", "-g", "yaml-language-server"]] },
+    { name: "HTML/CSS/JSON", command: "vscode-json-language-server", uninstallStrategies: [["npm", "uninstall", "-g", "vscode-langservers-extracted"]] },
+    { name: "Docker", command: "docker-langserver", uninstallStrategies: [["npm", "uninstall", "-g", "dockerfile-language-server-nodejs"]] },
+    { name: "SQL", command: "sql-language-server", uninstallStrategies: [["npm", "uninstall", "-g", "sql-language-server"]] },
+    { name: "PHP (intelephense)", command: "intelephense", uninstallStrategies: [["npm", "uninstall", "-g", "intelephense"]] },
+    { name: "Svelte", command: "svelteserver", uninstallStrategies: [["npm", "uninstall", "-g", "svelte-language-server"]] },
+    { name: "Vue", command: "vue-language-server", uninstallStrategies: [["npm", "uninstall", "-g", "@vue/language-server"]] },
+    { name: "Tailwind CSS", command: "tailwindcss-language-server", uninstallStrategies: [["npm", "uninstall", "-g", "@tailwindcss/language-server"]] },
+    { name: "GraphQL", command: "graphql-lsp", uninstallStrategies: [["npm", "uninstall", "-g", "graphql-language-service-cli"]] },
+
+    // Rust-analyzer: bundled with rustup toolchain — remove component or delete binary
+    { name: "Rust (rust-analyzer)", command: "rust-analyzer", uninstallStrategies: isWindows
+      ? [
+          ["rustup", "component", "remove", "rust-analyzer"],
+          ["cmd", "/c", "del", join(home, ".cargo", "bin", "rust-analyzer.exe")],
+        ]
+      : [
+          ["rustup", "component", "remove", "rust-analyzer"],
+          ["rm", "-f", join(home, ".cargo", "bin", "rust-analyzer")],
+        ]
+    },
+
+    // Go — delete the binary directly on Windows since go clean may not work
+    { name: "Go (gopls)", command: "gopls", uninstallStrategies: isWindows
+      ? [["cmd", "/c", "del", join(home, "go", "bin", "gopls.exe")], ["go", "clean", "-i", "golang.org/x/tools/gopls@latest"]]
+      : [["go", "clean", "-i", "golang.org/x/tools/gopls@latest"]]
+    },
+
+    // Ruby
+    { name: "Ruby (solargraph)", command: "solargraph", uninstallStrategies: [["gem", "uninstall", "solargraph", "-x"]] },
+
+    // .NET (csharp-ls on Windows, omnisharp on macOS/Linux)
+    { name: "C# (csharp-ls)", command: "csharp-ls", uninstallStrategies: isWindows
+      ? [["dotnet", "tool", "uninstall", "-g", "csharp-ls"]]
+      : [["dotnet", "tool", "uninstall", "-g", "csharp-ls"], ["dotnet", "tool", "uninstall", "-g", "omnisharp"]]
+    },
+
+    // C/C++ (clangd) — needs admin on Windows
+    { name: "C/C++ (clangd)", command: "clangd", uninstallStrategies: isWindows
+      ? [
+          ["winget", "uninstall", "--id", "LLVM.LLVM", "--force", "--accept-source-agreements", "--silent"],
+          ["scoop", "uninstall", "llvm"],
+          ["choco", "uninstall", "llvm"],
+        ]
+      : [["brew", "uninstall", "llvm"], ["apt-get", "remove", "-y", "clangd"]]
+    },
+
+    // Java (jdtls) — on Windows installed as shim + downloaded LSP
+    { name: "Java (jdtls)", command: "jdtls", uninstallStrategies: isWindows
+      ? [["cmd", "/c", "del", join(home, ".rsy-opencode", "bin", "jdtls.cmd")]]
+      : [["brew", "uninstall", "jdtls"]]
+    },
+
+    // Cargo-installed tools
+    { name: "TOML (taplo)", command: "taplo", uninstallStrategies: [["cargo", "uninstall", "taplo-cli"]] },
+
+    // Marksman — needs admin on Windows
+    { name: "Markdown (marksman)", command: "marksman", uninstallStrategies: isWindows
+      ? [
+          ["winget", "uninstall", "--id", "Artempyanykh.Marksman", "--force", "--accept-source-agreements", "--silent"],
+          ["scoop", "uninstall", "marksman"],
+          ["cargo", "uninstall", "marksman"],
+        ]
+      : [["brew", "uninstall", "marksman"], ["cargo", "uninstall", "marksman"]]
+    },
+
+    // Zig
+    { name: "Zig (zls)", command: "zls", uninstallStrategies: isWindows
+      ? [["scoop", "uninstall", "zls"], ["cargo", "uninstall", "zls"]]
+      : [["brew", "uninstall", "zls"], ["cargo", "uninstall", "zls"]]
+    },
+
+    // Dart
+    { name: "Dart", command: "dart", uninstallStrategies: isWindows
+      ? [["choco", "uninstall", "dart-sdk"], ["scoop", "uninstall", "dart"]]
+      : [["brew", "uninstall", "dart"]]
+    },
+
+    // Lua — installed via winget on Windows
+    { name: "Lua", command: "lua-language-server", uninstallStrategies: isWindows
+      ? [
+          ["winget", "uninstall", "--id", "LuaLS.lua-language-server", "--force", "--accept-source-agreements", "--silent"],
+          ["scoop", "uninstall", "lua-language-server"],
+        ]
+      : [["brew", "uninstall", "lua-language-server"]]
+    },
+
+    // Kotlin
+    { name: "Kotlin", command: "kotlin-language-server", uninstallStrategies: isWindows
+      ? [["scoop", "uninstall", "kotlin-language-server"]]
+      : [["brew", "uninstall", "kotlin-language-server"]]
+    },
+
+    // Terraform
+    { name: "Terraform", command: "terraform-ls", uninstallStrategies: isWindows
+      ? [["winget", "uninstall", "--id", "HashiCorp.Terraform", "--force", "--accept-source-agreements", "--silent"]]
+      : [["brew", "uninstall", "terraform-ls"]]
+    },
+
+    // Elixir
+    { name: "Elixir", command: "elixir-ls", uninstallStrategies: isWindows
+      ? [["scoop", "uninstall", "elixir-ls"]]
+      : [["brew", "uninstall", "elixir-ls"]]
+    },
+
+    // Scala
+    { name: "Scala (metals)", command: "metals", uninstallStrategies: isWindows
+      ? [["cs", "uninstall", "metals"]]
+      : [["brew", "uninstall", "metals"], ["cs", "uninstall", "metals"]]
+    },
+  ];
+}
+
+// ─── Helpers ─────────────────────────────────────────────────────────────────
+
+interface CommandResult {
+  ok: boolean;
+  output: string;
+}
+
+async function runCommand(command: string, args: string[]): Promise<CommandResult> {
+  try {
+    const proc = Bun.spawn([command, ...args], { stdout: "pipe", stderr: "pipe" });
+    // Timeout: 120s for winget (can be slow), 30s for others
+    const timeoutMs = command === "winget" ? 120_000 : 30_000;
+    const exitPromise = proc.exited;
+    let timer: ReturnType<typeof setTimeout>;
+    const timeoutPromise = new Promise<number>((_, reject) => {
+      timer = setTimeout(() => { proc.kill(); reject(new Error("timeout")); }, timeoutMs);
+    });
+    const exitCode = await Promise.race([exitPromise, timeoutPromise]);
+    clearTimeout(timer!);
+    const output = await new Response(proc.stdout).text();
+    return { ok: exitCode === 0, output };
+  } catch {
+    return { ok: false, output: "" };
+  }
+}
+
+/**
+ * Run a command elevated (as Administrator) on Windows via PowerShell.
+ * Triggers UAC prompt automatically. Returns true if successful.
+ */
+async function runElevated(command: string, argsString: string): Promise<boolean> {
+  try {
+    // Escape single quotes in args to prevent PowerShell injection
+    const safeCommand = command.replace(/'/g, "''");
+    const safeArgs = argsString.replace(/'/g, "''");
+    const proc = Bun.spawn([
+      "powershell.exe", "-NoProfile", "-Command",
+      `Start-Process '${safeCommand}' -ArgumentList '${safeArgs}' -Verb RunAs -Wait`
+    ], { stdout: "pipe", stderr: "pipe" });
+
+    const timeoutMs = 120_000;
+    const exitPromise = proc.exited;
+    const timeoutPromise = new Promise<number>((_, reject) =>
+      setTimeout(() => { proc.kill(); reject(new Error("timeout")); }, timeoutMs)
+    );
+    const exitCode = await Promise.race([exitPromise, timeoutPromise]);
+    return exitCode === 0;
+  } catch {
+    return false;
+  }
+}
+
+async function commandExists(cmd: string): Promise<boolean> {
+  const isWindows = platform() === "win32";
+
+  if (isWindows) {
+    // First try `where` (checks PATH)
+    try {
+      const proc = Bun.spawn(["where", cmd], { stdout: "pipe", stderr: "pipe" });
+      if ((await proc.exited) === 0) return true;
+    } catch {}
+
+    // Also check common Windows installation paths (matching install.ps1 behavior)
+    const home = process.env.USERPROFILE || "";
+    const localAppData = process.env.LOCALAPPDATA || join(home, "AppData", "Local");
+
+    // Check all possible extensions
+    const extensions = [".exe", ".cmd", ".bat", ""];
+    const basePaths = [
+      join(home, "go", "bin"),
+      join(home, ".dotnet", "tools"),
+      join(home, ".cargo", "bin"),
+      join(home, ".rsy-opencode", "bin"),
+      `C:\\Program Files\\LLVM\\bin`,
+      `C:\\Program Files\\Go\\bin`,
+      join(home, ".rustup", "toolchains", "stable-x86_64-pc-windows-msvc", "bin"),
+      join(localAppData, "Programs", "lua-language-server", "bin"),
+      join(localAppData, "Microsoft", "WinGet", "Links"),
+    ];
+
+    for (const base of basePaths) {
+      for (const ext of extensions) {
+        if (existsSync(join(base, `${cmd}${ext}`))) return true;
+      }
+    }
+
+    return false;
+  }
+
+  try {
+    const proc = Bun.spawn(["which", cmd], { stdout: "pipe", stderr: "pipe" });
+    return (await proc.exited) === 0;
+  } catch {
+    return false;
+  }
+}
+
+function askConfirmation(question: string): Promise<boolean> {
+  const rl = createInterface({
+    input: process.stdin,
+    output: process.stdout,
+  });
+
+  return new Promise((resolve) => {
+    rl.question(question, (answer) => {
+      rl.close();
+      const normalized = answer.trim().toLowerCase();
+      resolve(normalized === "y" || normalized === "yes");
+    });
+  });
+}
+
+// ─── Uninstall Steps ─────────────────────────────────────────────────────────
+
+interface UninstallResult {
+  configRemoved: boolean;
+  configBackupPath: string | null;
+  npmCacheVerified: boolean;
+  lspRemoved: string[];
+  lspSkipped: string[];
+  rsyCliRemoved: boolean;
+  opencodeRemoved: boolean;
+}
+
+async function removeConfigDirectory(deleteConfig: boolean, keepCli: boolean): Promise<{ removed: boolean; backupPath: string | null }> {
+  const configDir = getConfigDir();
+  const cliDir = join(configDir, "cli");
+  const hasCli = existsSync(cliDir);
+
+  console.log();
+  heading("1. Config Directory");
+  info(`Path: ${configDir}`);
+
+  if (!existsSync(configDir)) {
+    warn("Config directory tidak ditemukan. Skip.");
+    return { removed: false, backupPath: null };
+  }
+
+  if (!deleteConfig) {
+    info("Config directory dipertahankan. Gunakan --delete-config untuk menghapusnya.");
+    return { removed: false, backupPath: null };
+  }
+
+  // Create backup
+  const timestamp = new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19);
+  const backupDir = `${configDir}.bak.${timestamp}`;
+
+  info(`Membuat backup: ${backupDir}`);
+  try {
+    await mkdir(backupDir, { recursive: true });
+    await cp(configDir, backupDir, { recursive: true });
+    success(`Backup berhasil: ${backupDir}`);
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    error(`Gagal membuat backup: ${msg}`);
+    return { removed: false, backupPath: null };
+  }
+
+  // If CLI lives inside config dir and user wants to keep it, preserve it
+  let cliTempDir: string | null = null;
+  if (hasCli && keepCli) {
+    cliTempDir = join(configDir, "..", "opencode-cli-temp");
+    try {
+      await cp(cliDir, cliTempDir, { recursive: true });
+    } catch {
+      cliTempDir = null;
+    }
+  }
+
+  // Remove config
+  info("Menghapus config directory...");
+  try {
+    await rm(configDir, { recursive: true, force: true });
+    success("Config directory dihapus.");
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    error(`Gagal menghapus config: ${msg}`);
+    return { removed: false, backupPath: backupDir };
+  }
+
+  // Restore CLI if it was preserved
+  if (cliTempDir && existsSync(cliTempDir)) {
+    try {
+      await mkdir(configDir, { recursive: true });
+      await cp(cliTempDir, cliDir, { recursive: true });
+      await rm(cliTempDir, { recursive: true, force: true });
+      info("CLI source preserved di config directory.");
+    } catch {
+      warn("Gagal restore CLI. Jalankan: bun install -g rsy-opencode-tools");
+    }
+  }
+
+  return { removed: true, backupPath: backupDir };
+}
+
+async function verifyNpmCache(cleanNpmCache: boolean, keep: boolean): Promise<boolean> {
+  console.log();
+  heading("2. MCP Packages (npm/npx cache)");
+
+  if (keep) {
+    info("--keep-mcp flag aktif. MCP cache dipertahankan.");
+    return false;
+  }
+
+  info("MCP servers dijalankan via npx dan tersimpan di npm cache:");
+  for (const pkg of MCP_PACKAGES) {
+    console.log(`    • ${pkg}`);
+  }
+  console.log();
+
+  if (!cleanNpmCache) {
+    info("npm cache dipertahankan. Gunakan --clean-npm-cache untuk menjalankan verifikasi dan cleanup aman dari npm.");
+    return false;
+  }
+
+  info("Verifying npm cache...");
+  const result = await runCommand("npm", ["cache", "verify"]);
+
+  if (result.ok) {
+    success("npm cache verified; npm removed invalid cache data if found.");
+    return true;
+  } else {
+    warn("Gagal memverifikasi npm cache. Coba jalankan manual: npm cache verify");
+    return false;
+  }
+}
+
+async function removeLspServers(force: boolean, keep: boolean): Promise<{ removed: string[]; skipped: string[] }> {
+  console.log();
+  heading("3. LSP Servers");
+
+  const lspServers = buildLspServers();
+
+  if (keep) {
+    info("--keep-lsp flag aktif. LSP servers dipertahankan.");
+    return { removed: [], skipped: lspServers.map((s) => s.name) };
+  }
+
+  // Check which LSP servers are actually installed
+  info("Memeriksa LSP servers yang terinstall...");
+  const installed: LspServerInfo[] = [];
+
+  for (const server of lspServers) {
+    const exists = await commandExists(server.command);
+    if (exists) {
+      installed.push(server);
+    }
+  }
+
+  if (installed.length === 0) {
+    info("Tidak ada LSP server yang terdeteksi terinstall.");
+    return { removed: [], skipped: [] };
+  }
+
+  console.log();
+  info(`LSP servers yang terinstall (${installed.length}):`);
+  for (const server of installed) {
+    console.log(`    ✓ ${server.name}`);
+  }
+  console.log();
+
+  warn("LSP servers may have been installed independently of rsy-opencode-tools.");
+  if (force) {
+    warn("Skipping global LSP removal in --force mode. Run without --force to remove them interactively.");
+    return { removed: [], skipped: installed.map((s) => s.name) };
+  }
+
+  const confirmed = await askConfirmation("  Hapus LSP servers global yang terdeteksi? Ini bisa menghapus tool yang Anda install sendiri. (y/N): ");
+  if (!confirmed) {
+    info("LSP servers dipertahankan.");
+    return { removed: [], skipped: installed.map((s) => s.name) };
+  }
+
+  const isWindows = platform() === "win32";
+
+  const removed: string[] = [];
+  const skipped: string[] = [];
+
+  // Kill running LSP processes first (they lock the exe files)
+  if (isWindows) {
+    for (const server of installed) {
+      const procName = server.command.replace(/\.exe$/, "");
+      try {
+        await runCommand("powershell.exe", ["-NoProfile", "-Command", `Stop-Process -Name '${procName}' -Force -ErrorAction SilentlyContinue`]);
+      } catch {}
+    }
+    // Give OS time to release file locks
+    await new Promise((resolve) => setTimeout(resolve, 1000));
+  }
+
+  for (const server of installed) {
+    info(`Menghapus ${server.name}...`);
+
+    // Try each uninstall strategy in order until one succeeds
+    let uninstalled = false;
+    const failedStrategies: string[] = [];
+    
+    for (const strategy of server.uninstallStrategies) {
+      const [cmd, ...args] = strategy;
+      // Check if the uninstall tool exists first
+      const toolExists = await commandExists(cmd);
+      if (!toolExists) {
+        failedStrategies.push(`${cmd} not found`);
+        continue;
+      }
+
+      const result = await runCommand(cmd, args);
+      if (result.ok) {
+        success(`${server.name} dihapus.`);
+        removed.push(server.name);
+        uninstalled = true;
+        break;
+      }
+
+      failedStrategies.push(`${cmd} ${args.join(" ")}`);
+
+      // If winget failed, try elevated via PowerShell (triggers UAC)
+      if (cmd === "winget" && isWindows) {
+        info(`  Mencoba dengan elevated privileges...`);
+        const argsStr = args.join(" ");
+        const elevated = await runElevated("winget", argsStr);
+        if (elevated) {
+          success(`${server.name} dihapus (elevated).`);
+          removed.push(server.name);
+          uninstalled = true;
+          break;
+        }
+        failedStrategies.push("elevated winget failed");
+      }
+    }
+
+    if (!uninstalled) {
+      warn(`Gagal menghapus ${server.name}.`);
+      warn(`  Strategies tried:`);
+      for (const strategy of failedStrategies) {
+        warn(`    - ${strategy}`);
+      }
+      warn(`  Manual removal: ${server.uninstallStrategies[0].join(" ")}`);
+      skipped.push(server.name);
+    }
+  }
+
+  return { removed, skipped };
+}
+
+async function removeRsyCli(_force: boolean): Promise<boolean> {
+  console.log();
+  heading("4. rsy-opencode-tools CLI");
+
+  info("Menghapus rsy-opencode-tools (semua metode)...");
+
+  let removed = false;
+
+  // Try all possible ways rsy-opencode-tools could be installed
+  const strategies = [
+    { cmd: "bun", args: ["remove", "-g", "rsy-opencode-tools"], label: "bun global" },
+    { cmd: "npm", args: ["uninstall", "-g", "rsy-opencode-tools"], label: "npm global" },
+    { cmd: "bun", args: ["remove", "-g", "opencode-jce-tools"], label: "bun (alt name)" },
+    { cmd: "npm", args: ["uninstall", "-g", "opencode-jce-tools"], label: "npm (alt name)" },
+  ];
+
+  for (const s of strategies) {
+    const result = await runCommand(s.cmd, s.args);
+    if (result.ok) {
+      success(`  rsy-opencode-tools dihapus via ${s.label}.`);
+      removed = true;
+    }
+  }
+
+  const home = process.env.USERPROFILE || process.env.HOME || "";
+  const shimDirs = platform() === "win32"
+    ? [join(home, ".bun", "bin"), join(process.env.APPDATA || "", "npm")]
+    : [join(home, ".bun", "bin"), join(home, ".rsy-opencode", "npm-global", "bin")];
+  const shimNames = platform() === "win32"
+    ? ["rsy-opencode-tools", "opencode-jce.cmd", "opencode-jce.ps1", "opencode-jce.exe", "opencode-jce.bunx"]
+    : ["rsy-opencode-tools", "opencode-jce.cmd", "opencode-jce.exe", "opencode-jce.bunx"];
+  for (const dir of shimDirs) {
+    const root = resolve(dir);
+    for (const name of shimNames) {
+      const target = resolve(join(root, name));
+      const rel = relative(root, target);
+      if (rel.startsWith("..") || isAbsolute(rel) || !existsSync(target)) continue;
+      try {
+        await rm(target, { force: true });
+        removed = true;
+      } catch {}
+    }
+  }
+
+  // Also remove CLI source from config dir if it exists
+  const cliDir = join(getConfigDir(), "cli");
+  if (existsSync(cliDir)) {
+    try {
+      await rm(cliDir, { recursive: true, force: true });
+      success("  CLI source directory dihapus.");
+      removed = true;
+    } catch {}
+  }
+
+  if (!removed) {
+    warn("rsy-opencode-tools tidak ditemukan di package manager manapun.");
+  }
+
+  return removed;
+}
+
+async function removeOpenCodeCli(force: boolean): Promise<boolean> {
+  console.log();
+  heading("5. OpenCode CLI");
+
+  if (force) {
+    warn("Skipping OpenCode CLI removal in --force mode to avoid deleting a user-installed CLI.");
+    warn("Run without --force and confirm this step if you want to remove OpenCode itself.");
+    return false;
+  }
+
+  const confirmed = await askConfirmation("  Hapus OpenCode CLI? Ini bisa menghapus instalasi OpenCode milik user. (y/N): ");
+  if (!confirmed) {
+    info("OpenCode CLI dipertahankan.");
+    return false;
+  }
+
+  info("Menghapus opencode (semua metode)...");
+
+  let removed = false;
+
+  // Try ALL possible package names and managers
+  const strategies = [
+    { cmd: "npm", args: ["uninstall", "-g", "opencode-ai"], label: "npm opencode-ai" },
+    { cmd: "npm", args: ["uninstall", "-g", "opencode"], label: "npm opencode" },
+    { cmd: "npm", args: ["uninstall", "-g", "@anthropic/opencode"], label: "npm @anthropic/opencode" },
+    { cmd: "bun", args: ["remove", "-g", "opencode"], label: "bun opencode" },
+    { cmd: "bun", args: ["remove", "-g", "opencode-ai"], label: "bun opencode-ai" },
+  ];
+
+  for (const s of strategies) {
+    const result = await runCommand(s.cmd, s.args);
+    if (result.ok) {
+      success(`  OpenCode dihapus via ${s.label}.`);
+      removed = true;
+    }
+  }
+
+  // Also try to remove the binary/shim directly if still exists
+  if (platform() === "win32") {
+    const npmDir = process.env.APPDATA ? join(process.env.APPDATA, "npm") : "";
+    const filesToRemove = [
+      join(npmDir, "opencode"),
+      join(npmDir, "opencode.cmd"),
+      join(npmDir, "opencode.ps1"),
+    ];
+    for (const f of filesToRemove) {
+      if (existsSync(f)) {
+        try {
+          await rm(f, { force: true });
+          removed = true;
+        } catch {}
+      }
+    }
+    // Remove node_modules package
+    const nodeModulesDir = join(npmDir, "node_modules", "opencode-ai");
+    if (existsSync(nodeModulesDir)) {
+      try {
+        await rm(nodeModulesDir, { recursive: true, force: true });
+        success("  OpenCode node_modules dihapus.");
+        removed = true;
+      } catch {}
+    }
+  }
+
+  if (!removed) {
+    warn("OpenCode CLI tidak ditemukan di package manager manapun.");
+  }
+
+  return removed;
+}
+
+// ─── Summary ─────────────────────────────────────────────────────────────────
+
+function printSummary(result: UninstallResult): void {
+  console.log();
+  heading("📋 Uninstall Summary");
+  console.log();
+
+  const removed: string[] = [];
+  const kept: string[] = [];
+
+  // Config
+  if (result.configRemoved) {
+    removed.push("Config directory");
+    if (result.configBackupPath) {
+      info(`Backup tersimpan di: ${result.configBackupPath}`);
+    }
+  } else {
+    kept.push("Config directory");
+  }
+
+  // MCP cache
+  if (result.npmCacheVerified) {
+    removed.push("npm cache verified");
+  } else {
+    kept.push("npm cache");
+  }
+
+  // LSP
+  if (result.lspRemoved.length > 0) {
+    removed.push(`LSP servers: ${result.lspRemoved.join(", ")}`);
+  }
+  if (result.lspSkipped.length > 0) {
+    kept.push(`LSP servers: ${result.lspSkipped.join(", ")}`);
+  }
+
+  // CLIs
+  if (result.rsyCliRemoved) {
+    removed.push("rsy-opencode-tools CLI");
+  } else {
+    kept.push("rsy-opencode-tools CLI");
+  }
+
+  if (result.opencodeRemoved) {
+    removed.push("OpenCode CLI");
+  } else {
+    kept.push("OpenCode CLI");
+  }
+
+  // Print
+  if (removed.length > 0) {
+    console.log();
+    success("Dihapus:");
+    for (const item of removed) {
+      console.log(`    • ${item}`);
+    }
+  }
+
+  if (kept.length > 0) {
+    console.log();
+    info("Dipertahankan:");
+    for (const item of kept) {
+      console.log(`    • ${item}`);
+    }
+  }
+
+  console.log();
+  info("Git dan Bun TIDAK dihapus (digunakan oleh tools lain).");
+  console.log();
+}
+
+// ─── Command ─────────────────────────────────────────────────────────────────
+
+interface UninstallOptions {
+  force?: boolean;
+  keepLsp?: boolean;
+  keepMcp?: boolean;
+  deleteConfig?: boolean;
+  cleanNpmCache?: boolean;
+  yes?: boolean;
+}
+
+export const uninstallCommand = new Command("uninstall")
+  .description("Remove RSY OpenCode Tools configuration, MCP cache, LSP servers, and CLI tools")
+  .option("--force", "Skip confirmations for uninstall steps except protected user data")
+  .option("--keep-lsp", "Don't remove LSP servers (even with --force)")
+  .option("--keep-mcp", "Don't remove MCP cache (even with --force)")
+  .option("--delete-config", "Delete the OpenCode config directory after creating a backup")
+  .option("--clean-npm-cache", "Also clean npm cache (requires npm)")
+  .option("--yes", "Confirm all destructive operations without prompting (use with caution)")
+  .action(async (options: UninstallOptions) => {
+    banner();
+    heading("RSY OpenCode Tools — Uninstaller");
+
+    const force = options.force ?? false;
+    const keepLsp = options.keepLsp ?? false;
+    const keepMcp = options.keepMcp ?? false;
+    const deleteConfig = options.deleteConfig ?? false;
+    const cleanNpmCache = options.cleanNpmCache ?? false;
+    const yes = options.yes ?? false;
+
+    // Require --yes if --delete-config is used
+    if (deleteConfig && !yes && !force) {
+      error("--delete-config requires --yes flag to confirm. This will delete your config directory.");
+      error("Run: rsy-opencode-tools uninstall --delete-config --yes");
+      process.exit(EXIT_ERROR);
+    }
+
+    if (force) {
+      warn("Mode --force aktif: konfirmasi dilewati untuk langkah yang tidak dilindungi.");
+      if (!deleteConfig) info("Config directory tetap dipertahankan tanpa --delete-config.");
+      if (!cleanNpmCache) info("npm cache tetap dipertahankan tanpa --clean-npm-cache.");
+      if (keepLsp) info("--keep-lsp: LSP servers akan dipertahankan.");
+      if (keepMcp) info("--keep-mcp: MCP cache akan dipertahankan.");
+    }
+
+    if (yes) {
+      warn("Mode --yes aktif: semua operasi destructive akan dikonfirmasi otomatis.");
+    }
+
+    const result: UninstallResult = {
+      configRemoved: false,
+      configBackupPath: null,
+      npmCacheVerified: false,
+      lspRemoved: [],
+      lspSkipped: [],
+      rsyCliRemoved: false,
+      opencodeRemoved: false,
+    };
+
+    // Determine if user wants to keep CLI (ask early so we know before deleting config)
+    // In force mode, CLI will be removed. Otherwise ask later but we need to know now
+    // to preserve cli/ dir inside config.
+    let willRemoveCli = force || yes;
+    if (!force && !yes) {
+      // Peek: does CLI live inside config dir?
+      const cliInConfig = existsSync(join(getConfigDir(), "cli"));
+      if (cliInConfig) {
+        info("CLI source terdeteksi di dalam config directory.");
+      }
+    }
+
+    if (!force && !yes) {
+      willRemoveCli = await askConfirmation("  Hapus rsy-opencode-tools CLI? (y/N): ");
+    }
+
+    // Step 1: Config directory (preserve cli/ if user won't remove CLI)
+    const configResult = await removeConfigDirectory(deleteConfig, !willRemoveCli);
+    result.configRemoved = configResult.removed;
+    result.configBackupPath = configResult.backupPath;
+
+    // Step 2: MCP cache
+    result.npmCacheVerified = await verifyNpmCache(cleanNpmCache, keepMcp);
+
+    // Step 3: LSP servers
+    const lspResult = await removeLspServers(force || yes, keepLsp);
+    result.lspRemoved = lspResult.removed;
+    result.lspSkipped = lspResult.skipped;
+
+    // Step 4: rsy-opencode-tools CLI
+    result.rsyCliRemoved = willRemoveCli ? await removeRsyCli(force || yes) : false;
+
+    // Step 5: OpenCode CLI
+    result.opencodeRemoved = await removeOpenCodeCli(force || yes);
+
+    // Summary
+    printSummary(result);
+
+    process.exit(EXIT_SUCCESS);
+  });

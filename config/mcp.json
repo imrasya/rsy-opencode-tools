@@ -1,0 +1,40 @@
+{
+  "mcpServers": {
+    "context-keeper": {
+      "command": "bun",
+      "args": ["run", "${OPENCODE_CONFIG_DIR}/cli/src/mcp/context-keeper.ts"],
+      "env": {
+        "PROJECT_ROOT": "${PROJECT_ROOT}"
+      },
+      "description": "Auto-maintains .opencode-context.md — MUST call context_read at session start, context_update after tasks, context_checkpoint before session end"
+    },
+    "context7": {
+      "command": "npx",
+      "args": ["-y", "@upstash/context7-mcp@1"],
+      "description": "Search library documentation in real-time"
+    },
+    "github-search": {
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-github"],
+      "env": {
+        "GITHUB_PERSONAL_ACCESS_TOKEN": "${GITHUB_TOKEN}"
+      },
+      "description": "Search code across GitHub repositories"
+    },
+    "memory": {
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-memory"],
+      "description": "Persistent memory storage for context across sessions"
+    },
+    "playwright": {
+      "command": "npx",
+      "args": ["-y", "@playwright/mcp@latest"],
+      "description": "Browser automation — testing, scraping, screenshots, PDF generation"
+    },
+    "sequential-thinking": {
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-sequential-thinking"],
+      "description": "Structured step-by-step reasoning for complex problem solving"
+    }
+  }
+}

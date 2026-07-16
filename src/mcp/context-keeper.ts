@@ -1,0 +1,1012 @@
+#!/usr/bin/env bun
+/**
+ * context-keeper — MCP Server for automatic context preservation.
+ *
+ * Provides tools that the AI MUST call at specific points:
+ *   - context_read:       Read .opencode-context.md (call at session start)
+ *   - context_update:     Update specific sections (call after completing tasks)
+ *   - context_checkpoint: Validate & prune the file (call before session ends)
+ *
+ * This turns "remember to edit a file" into explicit tool calls,
+ * which AI models follow far more reliably than free-form instructions.
+ */
+
+import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
+import { readFile, writeFile, stat, rename } from "fs/promises";
+import { join } from "path";
+import { z } from "zod";
+import {
+  CONTEXT_FILENAME,
+  ARCHIVE_FILENAME,
+  MAX_LINES_TARGET,
+  MAX_LINES_HARD,
+  getContextTemplate,
+} from "../lib/context-template.js";
+import {
+  parseSessionMeta,
+  formatSessionMeta,
+  incrementSession,
+  markUpdated,
+  isStale,
+  computeContentHash,
+} from "../lib/context-session.js";
+import { smartPrune } from "../lib/context-similarity.js";
+import { enrichContext } from "../lib/context-enrichment.js";
+import {
+  parseRelatedProjects,
+  readRelatedContext,
+  formatRelatedSummary,
+} from "../lib/context-cross-project.js";
+import { detectConflict, mergeContexts } from "../lib/context-lock.js";
+import {
+  applyContextAutocapture,
+  buildSessionSummary,
+  compactContextContent,
+  PROJECT_FACTS_FILENAME,
+  writeProjectFacts,
+  type ContextCaptureInput,
+} from "../lib/context-autocapture.js";
+import {
+  ensureContextIndex,
+  listContextBuckets,
+  readContextIndex,
+  writeContextIndex,
+  pruneContextIndexNotes,
+  getContextIndexStats,
+  type ContextIndexInput,
+  type ContextIndexReadOptions,
+} from "../lib/context-index.js";
+import { withTimeout } from "../lib/timeout.js";
+
+// ─── Re-export section utilities (extracted to prevent circular deps) ────
+export { countLines, getSection, replaceSection } from "../lib/context-sections.js";
+import { countLines, getSection, replaceSection } from "../lib/context-sections.js";
+
+// ─── Helpers (exported for testing) ──────────────────────────
+
+export function getProjectRoot(): string {
+  const root = process.env.PROJECT_ROOT;
+  if (!root || root === "${PROJECT_ROOT}") {
+    return process.cwd();
+  }
+  return root;
+}
+
+function contextPath(): string {
+  return join(getProjectRoot(), CONTEXT_FILENAME);
+}
+
+function archivePath(): string {
+  return join(getProjectRoot(), ARCHIVE_FILENAME);
+}
+
+async function fileExists(path: string): Promise<boolean> {
+  try {
+    await stat(path);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Bounded wait for an fs operation. On Windows, antivirus/EDR scans can hold
+ * a file handle for tens of seconds during real-time scanning; without a
+ * timeout the MCP request hangs and OpenCode surfaces a generic MCP error.
+ *
+ * 10s is generous enough for any legitimate read/write of a context file
+ * (typical size < 100 KB) while still failing fast enough that the AI agent
+ * can retry within the same turn.
+ *
+ * Override via env `OPENCODE_JCE_MCP_FS_TIMEOUT_MS` for unusually slow disks.
+ */
+const DEFAULT_FS_TIMEOUT_MS = 10_000;
+
+async function withFsTimeout<T>(promise: Promise<T>, label: string): Promise<T> {
+  return withTimeout(promise, DEFAULT_FS_TIMEOUT_MS, label, { envOverride: "OPENCODE_JCE_MCP_FS_TIMEOUT_MS" });
+}
+
+async function readContext(): Promise<string | null> {
+  try {
+    return await withFsTimeout(readFile(contextPath(), "utf-8"), `read ${CONTEXT_FILENAME}`);
+  } catch (error) {
+    // Only treat a genuinely-missing file as "no context". Any other error
+    // (EACCES/EBUSY/EPERM — common on Windows under AV or concurrent access)
+    // must propagate so the caller never overwrites existing context with a
+    // blank template on a transient read failure.
+    if ((error as NodeJS.ErrnoException)?.code === "ENOENT") {
+      return null;
+    }
+    throw error;
+  }
+}
+
+async function writeContext(content: string): Promise<void> {
+  // Update the "Last updated" line
+  const today = new Date().toISOString().split("T")[0];
+  const updated = content.replace(
+    /> Last updated:.*/,
+    `> Last updated: ${today}`
+  );
+  await withFsTimeout(writeFileAtomic(contextPath(), updated), `write ${CONTEXT_FILENAME}`);
+}
+
+async function writeFileAtomic(path: string, content: string): Promise<void> {
+  const tmp = `${path}.tmp-${process.pid}-${Date.now()}`;
+  await writeFile(tmp, content, "utf-8");
+  await rename(tmp, path);
+}
+
+function refreshContentHash(content: string): string {
+  const hash = computeContentHash(content);
+  const meta = parseSessionMeta(content);
+  if (!meta) return content;
+  meta.contentHash = hash;
+  return content.replace(/^<!-- session: .+ -->$/m, formatSessionMeta(meta));
+}
+
+/**
+ * Remove completed tasks ([x]) from ## Current Status,
+ * and resolved/completed items from ## Important Notes.
+ *
+ * Important Notes items are pruned if they:
+ *   - Start with "- [x]" (completed checkbox)
+ *   - Start with "- [RESOLVED]" (explicitly marked resolved)
+ */
+export function pruneCompleted(content: string): string {
+  const lines = content.split("\n");
+  const result: string[] = [];
+  let currentSection = "";
+
+  for (const line of lines) {
+    if (line.startsWith("## ")) {
+      currentSection = line;
+      result.push(line);
+      continue;
+    }
+
+    // Prune [x] items from Current Status
+    if (
+      currentSection.startsWith("## Current Status") &&
+      /^\s*-\s*\[x\]/i.test(line)
+    ) {
+      continue;
+    }
+
+    // Prune [x] and [RESOLVED] items from Important Notes
+    if (
+      currentSection.startsWith("## Important Notes") &&
+      /^\s*-\s*(\[x\]|\[RESOLVED\])/i.test(line)
+    ) {
+      continue;
+    }
+
+    result.push(line);
+  }
+
+  return result.join("\n");
+}
+
+
+
+export interface ContextArchiveResult {
+  content: string;
+  archiveAppend: string;
+  actions: string[];
+}
+
+export function pruneAndArchiveContext(content: string, today = new Date().toISOString().split("T")[0]): ContextArchiveResult {
+  const actions: string[] = [];
+  let updated = pruneCompleted(content);
+  if (updated !== content) {
+    actions.push("Pruned completed/resolved items from Current Status and Important Notes");
+  }
+
+  let archiveAppend = "";
+  if (countLines(updated) > MAX_LINES_HARD) {
+    const archDecisions = getSection(updated, "Architecture Decisions");
+    const impNotes = getSection(updated, "Important Notes");
+
+    if (archDecisions.length > 3 || impNotes.length > 3) {
+      archiveAppend += `## Archived: ${today}\n`;
+
+      if (archDecisions.length > 3) {
+        const toArchive = archDecisions.slice(0, -3);
+        const toKeep = archDecisions.slice(-3);
+        archiveAppend += `### Architecture Decisions\n${toArchive.join("\n")}\n\n`;
+        updated = replaceSection(updated, "Architecture Decisions", toKeep);
+        actions.push(`Archived ${toArchive.length} old architecture decisions`);
+      }
+
+      if (impNotes.length > 3) {
+        const toArchive = impNotes.slice(0, -3);
+        const toKeep = impNotes.slice(-3);
+        archiveAppend += `### Important Notes\n${toArchive.join("\n")}\n\n`;
+        updated = replaceSection(updated, "Important Notes", toKeep);
+        actions.push(`Archived ${toArchive.length} old important notes`);
+      }
+
+      if (!updated.includes("see .opencode-context-archive.md")) {
+        updated = updated.replace(
+          /^> Auto-maintained by AI\..*$/m,
+          "> Auto-maintained by AI. You can edit this file freely.\n> Archived entries: see .opencode-context-archive.md"
+        );
+      }
+    }
+  }
+
+  return { content: updated, archiveAppend, actions };
+}
+
+async function appendArchive(content: string): Promise<void> {
+  if (!content) return;
+
+  let archiveContent = "";
+  if (await fileExists(archivePath())) {
+    archiveContent = await readFile(archivePath(), "utf-8");
+    archiveContent += "\n";
+  } else {
+    archiveContent = `# Context Archive\n> Historical decisions and notes. Reference only.\n\n`;
+  }
+  archiveContent += content;
+  await writeFileAtomic(archivePath(), archiveContent);
+}
+
+// ─── MCP Server ──────────────────────────────────────────────
+
+const server = new McpServer(
+  {
+    name: "context-keeper",
+    version: "1.0.0",
+  },
+  {
+    instructions: [
+      "MANDATORY: Call context_read at the START of every session.",
+      "Call context_update after completing any task or making architecture decisions.",
+      "Call context_checkpoint before the session ends or before committing.",
+    ].join(" "),
+  }
+);
+
+// ─── Tool: context_read ──────────────────────────────────────
+
+server.tool(
+  "context_read",
+  "Read .opencode-context.md at session start. Creates the file if it doesn't exist. Returns the current context.",
+  {},
+  async () => {
+    const existing = await readContext();
+
+    if (existing) {
+      const actions: string[] = [];
+
+      // 1. Increment session counter
+      let content = incrementSession(existing);
+      actions.push("Incremented session counter");
+
+      // 2. Structural prune (completed/resolved items + archive)
+      const pruned = pruneAndArchiveContext(content);
+      if (pruned.content !== content) {
+        await appendArchive(pruned.archiveAppend);
+        actions.push(...pruned.actions);
+      }
+      content = pruned.content;
+
+      // 3. Smart prune (dedup + resolved-note detection)
+      const smart = smartPrune(content);
+      if (smart.actions.length > 0) {
+        content = smart.prunedContent;
+        actions.push(...smart.actions);
+      }
+
+      // 4. Update content hash
+      const meta = parseSessionMeta(content);
+      if (meta) {
+        meta.lastPrune = new Date().toISOString().split("T")[0];
+        const metaLine = formatSessionMeta(meta);
+        content = content.replace(/^<!-- session: .+ -->$/m, metaLine);
+      }
+      content = refreshContentHash(content);
+
+      // 5. Write updated content
+      await writeContext(content);
+
+      // 6. Get enrichment data (git state, deps)
+      const projectRoot = getProjectRoot();
+      const enrichment = await enrichContext(projectRoot);
+
+      // 7. Get related project summaries
+      const relatedProjects = parseRelatedProjects(content);
+      let relatedSummary = "";
+      if (relatedProjects.length > 0) {
+        const relatedContexts = await readRelatedContext(projectRoot, relatedProjects);
+        relatedSummary = formatRelatedSummary(relatedContexts);
+      }
+
+      // 8. Check staleness
+      const sessionMeta = parseSessionMeta(content);
+      let stalenessWarning = "";
+      if (sessionMeta && isStale(sessionMeta)) {
+        stalenessWarning = `\nSTALENESS WARNING: Context may be outdated (${sessionMeta.sessionsWithoutUpdate ?? 0} sessions without update, last session: ${sessionMeta.lastSession}). Review and update all sections.`;
+      }
+
+      const lines = countLines(content);
+      const sessionInfo = sessionMeta
+        ? `Session #${sessionMeta.count}`
+        : "Session #1";
+
+      const responseParts: string[] = [
+        `--- .opencode-context.md (${lines} lines) — ${sessionInfo} ---`,
+        content,
+        "---",
+      ];
+
+      // Auto-maintenance actions
+      if (actions.length > 0) {
+        responseParts.push("Auto-maintenance:");
+        for (const a of actions) {
+          responseParts.push(`  - ${a}`);
+        }
+      }
+
+      // Enrichment data
+      if (enrichment) {
+        responseParts.push("");
+        responseParts.push("Project State:");
+        responseParts.push(enrichment);
+      }
+
+      // Related project summaries
+      if (relatedSummary) {
+        responseParts.push("");
+        responseParts.push(relatedSummary);
+      }
+
+      const buckets = await listContextBuckets(projectRoot);
+      if (buckets.length > 0) {
+        responseParts.push("");
+        responseParts.push("Context Index:");
+        responseParts.push(`  - Buckets: ${buckets.join(", ")}`);
+        try {
+          const stats = await getContextIndexStats(projectRoot);
+          responseParts.push(`  - Total notes: ${stats.totalNotes}, entries: ${stats.totalEntries}`);
+        } catch {
+          // stats unavailable
+        }
+        responseParts.push("  - Use context_index_read(bucket?) for focused handoff memory.");
+      }
+
+      // Staleness warning
+      if (stalenessWarning) {
+        responseParts.push(stalenessWarning);
+      }
+
+      // Line count warning
+      responseParts.push(
+        lines > MAX_LINES_TARGET
+          ? `WARNING: File has ${lines} lines (target: ${MAX_LINES_TARGET}). Consider archiving old entries.`
+          : `File size OK (${lines}/${MAX_LINES_TARGET} target lines).`
+      );
+
+      // Reminders
+      responseParts.push("");
+      responseParts.push("REMINDER: You MUST call context_update after completing any task.");
+      responseParts.push("REMINDER: You MUST call context_checkpoint before the session ends or before committing.");
+      responseParts.push("Failure to do so will result in lost context for the next session.");
+
+      return {
+        content: [
+          {
+            type: "text" as const,
+            text: responseParts.join("\n"),
+          },
+        ],
+      };
+    }
+
+    // Create new file from template
+    await writeContext(getContextTemplate());
+    await ensureContextIndex(getProjectRoot());
+    return {
+      content: [
+        {
+          type: "text" as const,
+          text: `Created new ${CONTEXT_FILENAME} from template. Please auto-detect the project stack and update the ## Stack section.`,
+        },
+      ],
+    };
+  }
+);
+
+// ─── Tool: context_update ────────────────────────────────────
+
+server.tool(
+  "context_update",
+  "Update a specific section of .opencode-context.md. Use after completing tasks, making decisions, or adding dependencies.",
+  {
+    section: z
+      .enum([
+        "Stack",
+        "Architecture Decisions",
+        "Conventions",
+        "Current Status",
+        "Important Notes",
+        "Related Projects",
+      ])
+      .describe("Which section to update"),
+    action: z
+      .enum(["add", "replace"])
+      .describe(
+        "add = append lines to section, replace = replace entire section content"
+      ),
+    lines: z
+      .array(z.string().max(200))
+      .min(1)
+      .max(20)
+      .describe(
+        'Lines to add/replace. Use "- [x] task" for completed, "- [ ] task" for pending.'
+      ),
+    expectedHash: z.string().optional().describe("Optional content hash from context_read for optimistic concurrency checks"),
+  },
+  async ({ section, action, lines: rawLines, expectedHash }) => {
+    // Sanitize: strip lines that could corrupt section structure
+    const lines = rawLines
+      .map((l) => (l.startsWith("## ") ? `- ${l.slice(3)}` : l))
+      .map((l) => l.replace(/\r?\n/g, " ")); // no embedded newlines
+
+    let content = await readContext();
+
+    if (!content) {
+      // Auto-create if missing
+      content = getContextTemplate();
+    }
+
+    let updated: string;
+
+    if (action === "replace") {
+      updated = replaceSection(content, section, lines);
+    } else {
+      // Add: append to existing section
+      const existing = getSection(content, section);
+      // Deduplicate: don't add lines that already exist
+      const newLines = lines.filter(
+        (l) => !existing.some((e) => e.trim() === l.trim())
+      );
+      if (newLines.length === 0) {
+        return {
+          content: [
+            {
+              type: "text" as const,
+              text: `No new lines to add — all entries already exist in ## ${section}.`,
+            },
+          ],
+        };
+      }
+      updated = replaceSection(content, section, [...existing, ...newLines]);
+    }
+
+    // Mark session as updated (reset sessionsWithoutUpdate)
+    updated = markUpdated(updated);
+
+    // Update content hash
+    updated = refreshContentHash(updated);
+
+    let conflictNote = "";
+    if (expectedHash) {
+      const readHash = computeContentHash(content);
+      const conflict = detectConflict(expectedHash, readHash);
+      if (conflict.hasConflict) {
+        const current = await readContext();
+        if (current) {
+          updated = mergeContexts(content, updated, current);
+          updated = markUpdated(refreshContentHash(updated));
+          conflictNote = " Conflict detected; merged non-overlapping section additions.";
+        }
+      }
+    }
+
+    await writeContext(updated);
+
+    const lineCount = countLines(updated);
+    const warning =
+      lineCount > MAX_LINES_HARD
+        ? `\nWARNING: File now has ${lineCount} lines (hard limit: ${MAX_LINES_HARD}). Call context_checkpoint to auto-archive.`
+        : "";
+
+    return {
+      content: [
+        {
+          type: "text" as const,
+              text: `Updated ## ${section} (${action}). File: ${lineCount} lines.${conflictNote}${warning}\nREMINDER: Call context_checkpoint before session ends or before committing.`,
+        },
+      ],
+    };
+  }
+);
+
+// ─── Tool: context_checkpoint ────────────────────────────────
+
+server.tool(
+  "context_checkpoint",
+  "Validate, prune, and optionally archive .opencode-context.md. Call before session ends or before committing.",
+  {},
+  async () => {
+    let content = await readContext();
+
+    if (!content) {
+      return {
+        content: [
+          {
+            type: "text" as const,
+            text: `No ${CONTEXT_FILENAME} found. Nothing to checkpoint.`,
+          },
+        ],
+      };
+    }
+
+    const pruned = pruneAndArchiveContext(content);
+    const actions: string[] = [...pruned.actions];
+    content = refreshContentHash(pruned.content);
+    await appendArchive(pruned.archiveAppend);
+
+    await writeContext(content);
+
+    const finalLines = countLines(content);
+    actions.push(`Final file: ${finalLines} lines`);
+
+    return {
+      content: [
+        {
+          type: "text" as const,
+          text: [
+            "Checkpoint complete:",
+            ...actions.map((a) => `  - ${a}`),
+            "",
+            finalLines > MAX_LINES_TARGET
+              ? `Note: File still above target (${finalLines}/${MAX_LINES_TARGET}). Consider manually trimming verbose entries.`
+              : "File size is within target.",
+          ].join("\n"),
+        },
+      ],
+    };
+  }
+);
+
+const contextCaptureSchema = {
+  changedFiles: z.array(z.string()).optional().describe("Files changed/touched in this session"),
+  summary: z.string().optional().describe("High-confidence session/task summary to persist"),
+  verification: z.array(z.string()).optional().describe("Commands/results verified in this session"),
+  blockers: z.array(z.string()).optional().describe("Current blockers that future sessions must know"),
+  nextSteps: z.array(z.string()).optional().describe("Concrete next steps for future sessions"),
+  android: z.object({
+    module: z.string().optional(),
+    packageName: z.string().optional(),
+    commands: z.array(z.string()).optional(),
+    logcatAvailable: z.boolean().optional(),
+  }).optional().describe("Android-specific durable project/session facts"),
+};
+
+// ─── Tool: context_autocapture ────────────────────────────────
+
+server.tool(
+  "context_autocapture",
+  "Automatically capture high-confidence session continuity facts into .opencode-context.md and structured project facts.",
+  contextCaptureSchema,
+  async (input: ContextCaptureInput) => {
+    let content = await readContext();
+    if (!content) content = getContextTemplate();
+
+    const captured = applyContextAutocapture(content, input);
+    let updated = markUpdated(captured.content);
+    updated = refreshContentHash(updated);
+    await writeContext(updated);
+    const facts = await writeProjectFacts(getProjectRoot(), input);
+    const indexed = await writeContextIndex(getProjectRoot(), input);
+
+    return {
+      content: [{
+        type: "text" as const,
+        text: [
+          "Context autocapture complete:",
+          ...captured.entries.map((entry) => `  - ${entry.section}: ${entry.line} (${entry.confidence})`),
+          `Structured facts updated: ${PROJECT_FACTS_FILENAME}`,
+          `Project type: ${facts.projectType ?? "unknown"}`,
+          indexed ? `Context index updated: ${indexed.indexPath} -> ${indexed.notePath}` : "Context index unchanged: no durable details supplied",
+        ].join("\n"),
+      }],
+    };
+  },
+);
+
+// ─── Tool: context_session_summary ────────────────────────────
+
+server.tool(
+  "context_session_summary",
+  "Write a compact continuity summary for the next session, including touched files, verification, blockers, and next steps.",
+  contextCaptureSchema,
+  async (input: ContextCaptureInput) => {
+    let content = await readContext();
+    if (!content) content = getContextTemplate();
+    const lines = buildSessionSummary(input);
+    if (lines.length === 0) {
+      return { content: [{ type: "text" as const, text: "No session summary lines generated; provide summary, files, verification, blockers, or nextSteps." }] };
+    }
+    const existing = getSection(content, "Current Status");
+    let updated = replaceSection(content, "Current Status", [...existing, ...lines.filter((line) => !existing.includes(line))]);
+    updated = markUpdated(refreshContentHash(updated));
+    await writeContext(updated);
+    await writeProjectFacts(getProjectRoot(), input);
+    const indexed = await writeContextIndex(getProjectRoot(), input);
+    return { content: [{ type: "text" as const, text: [`Session summary captured:`, ...lines.map((line) => `  - ${line}`), indexed ? `Context index updated: ${indexed.indexPath} -> ${indexed.notePath}` : "Context index unchanged."].join("\n") }] };
+  },
+);
+
+// ─── Tool: context_index_read ─────────────────────────────────
+
+server.tool(
+  "context_index_read",
+  "Read the advanced RSY context index. Omit bucket for master index, or pass a bucket such as release, agents, config, android, testing.",
+  {
+    bucket: z.string().optional().describe("Optional context bucket to read"),
+    since: z.string().optional().describe("Filter entries by ISO date prefix (e.g. 2026-06-02)"),
+    agent: z.string().optional().describe("Filter entries by agent name"),
+    keyword: z.string().optional().describe("Filter entries by keyword in summary"),
+  },
+  async ({ bucket, since, agent, keyword }) => {
+    const options: ContextIndexReadOptions = { bucket, since, agent, keyword };
+    const text = await readContextIndex(getProjectRoot(), options);
+    return { content: [{ type: "text" as const, text }] };
+  },
+);
+
+// ─── Tool: context_index_update ───────────────────────────────
+
+server.tool(
+  "context_index_update",
+  "Write focused handoff memory into .rsy-opencode/context/ indexes and notes without bloating .opencode-context.md.",
+  {
+    bucket: z.string().optional().describe("Bucket name, e.g. release, agents, config, android, testing"),
+    agent: z.string().optional().describe("Agent/tool name writing this memory"),
+    ...contextCaptureSchema,
+  },
+  async (input: ContextIndexInput) => {
+    const indexed = await writeContextIndex(getProjectRoot(), input);
+    if (!indexed) return { content: [{ type: "text" as const, text: "No context index entry written; provide summary, files, verification, blockers, nextSteps, or android facts." }] };
+    return { content: [{ type: "text" as const, text: [`Context index updated:`, `  - Bucket: ${indexed.bucket}`, `  - Index: ${indexed.indexPath}`, `  - Note: ${indexed.notePath}`, `  - Entry: ${indexed.entry}`].join("\n") }] };
+  },
+);
+
+// ─── Tool: context_index_prune ────────────────────────────────
+
+server.tool(
+  "context_index_prune",
+  "Prune old context index notes and entries by age or count. Use dryRun to preview.",
+  {
+    bucket: z.string().describe("Bucket to prune, e.g. release, testing, agents"),
+    maxAge: z.number().optional().describe("Delete notes older than N days (default 30)"),
+    maxNotes: z.number().optional().describe("Keep at most N notes per bucket (default 50)"),
+    dryRun: z.boolean().optional().describe("Preview pruning without deleting files"),
+  },
+  async ({ bucket, maxAge, maxNotes, dryRun }) => {
+    const result = await pruneContextIndexNotes(getProjectRoot(), bucket, { maxAge, maxNotes, dryRun });
+    return {
+      content: [{
+        type: "text" as const,
+        text: [
+          dryRun ? "Context index prune dry run:" : "Context index prune complete:",
+          `  - Bucket: ${result.bucket}`,
+          `  - Notes to delete: ${result.deletedNotes.length}`,
+          `  - Index entries to remove: ${result.prunedEntries}`,
+          ...result.deletedNotes.slice(0, 10).map((n) => `    - ${n}`),
+          result.deletedNotes.length > 10 ? `    ... and ${result.deletedNotes.length - 10} more` : "",
+        ].filter(Boolean).join("\n"),
+      }],
+    };
+  },
+);
+
+// ─── Tool: context_index_stats ────────────────────────────────
+
+server.tool(
+  "context_index_stats",
+  "Show context index usage statistics: bucket counts, note counts, entry counts, last updated dates.",
+  {},
+  async () => {
+    const stats = await getContextIndexStats(getProjectRoot());
+    return {
+      content: [{
+        type: "text" as const,
+        text: [
+          "Context Index Stats:",
+          `  - Total notes: ${stats.totalNotes}`,
+          `  - Total entries: ${stats.totalEntries}`,
+          "",
+          ...stats.buckets.map((b) => `  - ${b.name}: ${b.entryCount} entries, ${b.noteCount} notes, last: ${b.lastUpdated ?? "never"}`),
+        ].join("\n"),
+      }],
+    };
+  },
+);
+
+// ─── Tool: context_compact ────────────────────────────────────
+
+server.tool(
+  "context_compact",
+  "Compact duplicate or verbose Current Status and Important Notes entries while preserving durable continuity facts.",
+  {
+    dryRun: z.boolean().optional().describe("Preview compaction without writing changes"),
+  },
+  async ({ dryRun }) => {
+    const content = await readContext();
+    if (!content) return { content: [{ type: "text" as const, text: `No ${CONTEXT_FILENAME} found. Nothing to compact.` }] };
+    const compacted = compactContextContent(content);
+    if (!dryRun && compacted.actions.length > 0) {
+      const updated = markUpdated(refreshContentHash(compacted.content));
+      await writeContext(updated);
+    }
+    return {
+      content: [{
+        type: "text" as const,
+        text: [
+          dryRun ? "Context compact dry run:" : "Context compact complete:",
+          ...(compacted.actions.length ? compacted.actions.map((action) => `  - ${action}`) : ["  - No compaction needed"]),
+        ].join("\n"),
+      }],
+    };
+  },
+);
+
+// ─── Tool: context_history ───────────────────────────────────
+
+server.tool(
+  "context_history",
+  "Show session stats, staleness status, and section sizes for the context file.",
+  {},
+  async () => {
+    const content = await readContext();
+
+    if (!content) {
+      return {
+        content: [
+          {
+            type: "text" as const,
+            text: `No ${CONTEXT_FILENAME} found. Call context_read first.`,
+          },
+        ],
+      };
+    }
+
+    const lines = countLines(content);
+    const meta = parseSessionMeta(content);
+
+    const responseParts: string[] = [
+      `File: ${CONTEXT_FILENAME} (${lines} lines)`,
+      "",
+    ];
+
+    // Session stats
+    if (meta) {
+      responseParts.push("Session Stats:");
+      responseParts.push(`  - Session count: ${meta.count}`);
+      responseParts.push(`  - Last session: ${meta.lastSession}`);
+      responseParts.push(`  - Last update: ${meta.lastUpdate ?? "never"}`);
+      responseParts.push(`  - Sessions without update: ${meta.sessionsWithoutUpdate ?? 0}`);
+      responseParts.push(`  - Last prune: ${meta.lastPrune ?? "never"}`);
+      responseParts.push(`  - Content hash: ${meta.contentHash ?? "none"}`);
+      responseParts.push("");
+
+      // Staleness status
+      const stale = isStale(meta);
+      responseParts.push(`Staleness: ${stale ? "STALE — review and update all sections" : "OK"}`);
+    } else {
+      responseParts.push("Session Stats: No session metadata found (file predates v2).");
+    }
+
+    // Section sizes
+    responseParts.push("");
+    responseParts.push("Section Sizes:");
+    const sections = [
+      "Stack",
+      "Architecture Decisions",
+      "Conventions",
+      "Current Status",
+      "Important Notes",
+      "Related Projects",
+    ];
+    for (const section of sections) {
+      const entries = getSection(content, section);
+      if (entries.length > 0) {
+        responseParts.push(`  - ${section}: ${entries.length} entries`);
+      }
+    }
+
+    return {
+      content: [
+        {
+          type: "text" as const,
+          text: responseParts.join("\n"),
+        },
+      ],
+    };
+  }
+);
+
+// ─── Tool: context_query_related ─────────────────────────────
+
+server.tool(
+  "context_query_related",
+  "Query context from related projects defined in the Related Projects section.",
+  {
+    project: z
+      .string()
+      .optional()
+      .describe("Filter to a specific related project path. If omitted, returns all."),
+  },
+  async ({ project }) => {
+    const content = await readContext();
+
+    if (!content) {
+      return {
+        content: [
+          {
+            type: "text" as const,
+            text: `No ${CONTEXT_FILENAME} found. Call context_read first.`,
+          },
+        ],
+      };
+    }
+
+    let related = parseRelatedProjects(content);
+
+    if (related.length === 0) {
+      return {
+        content: [
+          {
+            type: "text" as const,
+            text: `No related projects found in ## Related Projects section. Add entries like: - ../other-project: "Description"`,
+          },
+        ],
+      };
+    }
+
+    // Filter to specific project if requested
+    if (project) {
+      related = related.filter(
+        (r) => r.path === project || r.path.includes(project)
+      );
+      if (related.length === 0) {
+        return {
+          content: [
+            {
+              type: "text" as const,
+              text: `No related project matching "${project}" found.`,
+            },
+          ],
+        };
+      }
+    }
+
+    const projectRoot = getProjectRoot();
+    const contexts = await readRelatedContext(projectRoot, related);
+
+    if (contexts.length === 0) {
+      return {
+        content: [
+          {
+            type: "text" as const,
+            text: `Found ${related.length} related project(s) but none have a ${CONTEXT_FILENAME} file.`,
+          },
+        ],
+      };
+    }
+
+    const summary = formatRelatedSummary(contexts);
+
+    return {
+      content: [
+        {
+          type: "text" as const,
+          text: summary || "No context data available from related projects.",
+        },
+      ],
+    };
+  }
+);
+
+// ─── Start ───────────────────────────────────────────────────
+
+/**
+ * Time (ms) to wait for the JSON-RPC `initialize` handshake from OpenCode
+ * before logging a warning. We do NOT exit on timeout — slow-loading OpenCode
+ * (cold start, AV scan, network plugin fetch) can take 30s+. Logging only.
+ */
+const MCP_INIT_HANDSHAKE_WARN_MS = 45_000;
+
+/**
+ * Wire up resilience so a single transient stdio error does not kill the MCP
+ * server. The most common failure mode on Windows is EPIPE on stdout when
+ * OpenCode briefly closes/recycles its child process pipes during slow load.
+ *
+ * Behavior:
+ *  - EPIPE on stdout: swallow (parent is recycling pipe; next write will succeed
+ *    after MCP SDK auto-reopens or the new transport binds).
+ *  - SIGPIPE: ignored (Unix-only); Node would otherwise terminate the process.
+ *  - SIGTERM/SIGINT: graceful exit code 0 so OpenCode does not surface "MCP
+ *    server crashed" to the user.
+ *  - Unhandled rejections / uncaught exceptions: log to stderr but stay alive
+ *    so OpenCode can retry the JSON-RPC request after its event loop resumes.
+ */
+function installResilienceHandlers(): void {
+  // EPIPE on stdout/stderr is the #1 cause of "MCP error when OpenCode loads
+  // slowly". Node by default emits this as an uncaught error on the stream
+  // and kills the process. We swallow it; the MCP SDK will reattempt the
+  // next write when the transport recovers.
+  const swallowEpipe = (err: NodeJS.ErrnoException) => {
+    if (err && err.code === "EPIPE") return;
+    // For any other stream error, log to stderr but stay alive so the next
+    // initialize attempt from OpenCode can succeed.
+    try { console.error("context-keeper stream error:", err.message); } catch { /* ignore */ }
+  };
+  process.stdout.on("error", swallowEpipe);
+  process.stderr.on("error", swallowEpipe);
+
+  // SIGPIPE is delivered on Unix when the parent closes its pipe end mid-write.
+  // Node's default handler exits the process; we want to stay alive and let
+  // the next stdin chunk drive the MCP transport.
+  if (typeof process.on === "function") {
+    try { process.on("SIGPIPE", () => { /* keep MCP alive */ }); } catch { /* not all platforms */ }
+  }
+
+  // Slow OpenCode load can fire SIGTERM during initialization (e.g. user
+  // cancelled, OpenCode restart). Exit 0 so the parent doesn't classify us
+  // as crashed.
+  for (const sig of ["SIGTERM", "SIGINT", "SIGHUP"] as const) {
+    try { process.on(sig, () => process.exit(0)); } catch { /* ignore */ }
+  }
+
+  // Surface stray errors without dying. The MCP SDK occasionally throws on
+  // partial JSON-RPC frames when stdio is recycled; we log and continue so
+  // the next valid frame is processed normally.
+  process.on("unhandledRejection", (reason) => {
+    try { console.error("context-keeper unhandled rejection:", reason); } catch { /* ignore */ }
+  });
+  process.on("uncaughtException", (err) => {
+    if ((err as NodeJS.ErrnoException)?.code === "EPIPE") return;
+    try { console.error("context-keeper uncaught exception:", err); } catch { /* ignore */ }
+  });
+}
+
+async function main() {
+  installResilienceHandlers();
+  const transport = new StdioServerTransport();
+
+  // Warn (don't fail) when OpenCode is slow to send the initialize handshake.
+  // This is purely diagnostic — the server stays connected and ready.
+  const initWarn = setTimeout(() => {
+    try {
+      console.error(
+        `context-keeper: still waiting for OpenCode initialize after ${MCP_INIT_HANDSHAKE_WARN_MS}ms; ` +
+        `OpenCode may be cold-starting. MCP server will keep listening.`,
+      );
+    } catch { /* ignore */ }
+  }, MCP_INIT_HANDSHAKE_WARN_MS);
+  // Allow process to exit naturally; the timer must not keep the event loop alive.
+  if (typeof initWarn.unref === "function") initWarn.unref();
+
+  try {
+    await server.connect(transport);
+  } finally {
+    clearTimeout(initWarn);
+  }
+}
+
+if (import.meta.main) {
+  main().catch((err) => {
+    // Only exit on a genuine connect failure (e.g. malformed transport). For
+    // transient stdio issues the resilience handlers above keep us alive and
+    // we never reach here.
+    try { console.error("context-keeper failed to start:", err); } catch { /* ignore */ }
+    process.exit(1);
+  });
+}

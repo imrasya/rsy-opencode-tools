@@ -1,0 +1,19 @@
+node_modules/
+dist/
+.env
+.env.*
+*.log
+.DS_Store
+coverage/
+*.tgz
+AUDIT*.txt
+docs/
+.playwright-mcp/
+.dev-sandbox/
+
+# Local AI/session runtime (never publish)
+.opencode-jce/
+.opencode-context.md
+.opencode-context-archive.md
+.rsy-opencode/
+.rsy-opencode-tools/
