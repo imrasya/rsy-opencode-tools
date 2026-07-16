@@ -18,18 +18,26 @@ export function resetSessionNotifyThrottle(): void {
   lastNotifyAt = 0;
 }
 
-export function notifySessionIdle(title = "OpenCode", message = "Session ready"): void {
-  if (!shouldNotifySessionIdle()) return;
+/** Spawn desktop notify; swallow missing-binary errors (CI/headless). */
+function safeSpawn(cmd: string, args: string[]): void {
   try {
-    if (process.platform === "darwin") {
-      const script = `display notification ${JSON.stringify(message)} with title ${JSON.stringify(title)}`;
-      spawn("osascript", ["-e", script], { stdio: "ignore", detached: true }).unref();
-      return;
-    }
-    if (process.platform === "linux") {
-      spawn("notify-send", [title, message], { stdio: "ignore", detached: true }).unref();
-    }
+    const child = spawn(cmd, args, { stdio: "ignore", detached: true });
+    // spawn errors (ENOENT) are async — try/catch alone is not enough
+    child.on("error", () => {});
+    child.unref();
   } catch {
     // never break the session on notify failure
+  }
+}
+
+export function notifySessionIdle(title = "OpenCode", message = "Session ready"): void {
+  if (!shouldNotifySessionIdle()) return;
+  if (process.platform === "darwin") {
+    const script = `display notification ${JSON.stringify(message)} with title ${JSON.stringify(title)}`;
+    safeSpawn("osascript", ["-e", script]);
+    return;
+  }
+  if (process.platform === "linux") {
+    safeSpawn("notify-send", [title, message]);
   }
 }
