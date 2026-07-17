@@ -6,6 +6,20 @@ Format based on [Keep a Changelog](https://keepachangelog.com/), versioned with 
 
 ---
 
+## [1.0.1] - 2026-07-18
+
+### Fixed
+- **RTK installer URL** (`install.sh`): `rtk-ai/rtk/main` 404 → official `refs/heads/master/install.sh` (`| sh`). Session PATH adds `~/.local/bin` after install; brew fallback hint on failure.
+- **Windows RTK install** (`install.ps1`): remove nonexistent upstream `install.ps1`; prefer WSL + `install.sh`, else manual `rtk-x86_64-pc-windows-msvc.zip` from GitHub releases.
+
+### Changed
+- Version synced to `1.0.1` (package.json, constants, installers, MCP context-keeper, config version, README badge, version tests) so installed clients pick up the fix via self-update.
+
+### Verification
+- `bash -n install.sh` exit 0.
+- `bun test tests/unit/version-sync.test.ts tests/unit/ui.test.ts tests/unit/plugin-workflow-tool.test.ts tests/unit/audit-fixes.test.ts` 88 pass / 0 fail.
+- `curl -sI https://raw.githubusercontent.com/rtk-ai/rtk/refs/heads/master/install.sh` HTTP 200.
+
 ## [1.0.0] - 2026-07-15
 
 ### Changed

@@ -120,6 +120,12 @@ describe("audit fixes", () => {
     expect(ps).toContain("@dietrichgebert/ponytail");
     expect(ps).not.toContain("@dietrichgeber/ponytail");
     expect(ps).toContain("Ponytail already registered in opencode.json");
+    // RTK official install is master branch (main 404); no install.ps1 on upstream
+    expect(sh).toContain("rtk-ai/rtk/refs/heads/master/install.sh");
+    expect(sh).not.toContain("rtk-ai/rtk/main/install.sh");
+    expect(ps).toContain("rtk-ai/rtk/refs/heads/master/install.sh");
+    expect(ps).not.toContain("rtk-ai/rtk/main/install.ps1");
+    expect(ps).not.toContain("rtk-ai/rtk/main/install.sh");
     expect(sh).toContain("is_interactive()");
     expect(sh).toContain("[ -r /dev/tty ]");
     expect(sh).toContain("read_prompt()");

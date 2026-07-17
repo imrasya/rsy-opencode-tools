@@ -258,7 +258,7 @@ async function appendArchive(content: string): Promise<void> {
 const server = new McpServer(
   {
     name: "context-keeper",
-    version: "1.0.0",
+    version: "1.0.1",
   },
   {
     instructions: [

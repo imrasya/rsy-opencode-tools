@@ -6,7 +6,7 @@ set -euo pipefail
 # One command to install everything you need for RSY Open Code Tools CLI
 # ═══════════════════════════════════════════════════════════════
 
-VERSION="1.0.0"
+VERSION="1.0.1"
 REPO_URL="https://github.com/imrasya/rsy-opencode-tools.git"
 # LOCAL_SOURCE=/path/to/workspace → install from local tree (skip git clone). For pre-push dry-runs.
 LOCAL_SOURCE="${LOCAL_SOURCE:-}"
@@ -78,7 +78,8 @@ offer_rtk_install() {
     fi
     if ! is_interactive; then
         warn "Non-interactive mode: skipping RTK install."
-        info "Install later: curl -fsSL https://raw.githubusercontent.com/rtk-ai/rtk/main/install.sh | bash"
+        # Official branch is master (main 404). Prefer refs/heads/master (stable raw path).
+        info "Install later: curl -fsSL https://raw.githubusercontent.com/rtk-ai/rtk/refs/heads/master/install.sh | sh"
         return
     fi
     info "RTK — AI token saver (60-90% less tokens). Install?"
@@ -90,10 +91,15 @@ offer_rtk_install() {
         *) ;;
     esac
     info "Installing RTK..."
-    if curl -fsSL https://raw.githubusercontent.com/rtk-ai/rtk/main/install.sh | bash; then
+    if curl -fsSL https://raw.githubusercontent.com/rtk-ai/rtk/refs/heads/master/install.sh | sh; then
+        # Ensure ~/.local/bin is on PATH for this session (official install target)
+        if [ -d "$HOME/.local/bin" ] && [[ ":$PATH:" != *":$HOME/.local/bin:"* ]]; then
+            export PATH="$HOME/.local/bin:$PATH"
+        fi
         success "RTK installed. Run 'rtk init -g --opencode' to configure."
     else
-        warn "RTK install failed. Install manually: curl -fsSL https://raw.githubusercontent.com/rtk-ai/rtk/main/install.sh | bash"
+        warn "RTK install failed. Install manually: curl -fsSL https://raw.githubusercontent.com/rtk-ai/rtk/refs/heads/master/install.sh | sh"
+        info "Or: brew install rtk  (then verify: rtk gain)"
     fi
 }
 

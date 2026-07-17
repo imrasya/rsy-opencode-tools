@@ -5,7 +5,7 @@
 # ===================================================================
 
 $ErrorActionPreference = "Stop"
-$Version = "1.0.0"
+$Version = "1.0.1"
 $RepoUrl = "https://github.com/imrasya/rsy-opencode-tools.git"
 $TempDir = Join-Path $env:TEMP "rsy-opencode-tools-install-$([System.IO.Path]::GetRandomFileName())"
 $JceBinDir = Join-Path $env:USERPROFILE ".rsy-opencode-tools\bin"
@@ -73,25 +73,38 @@ function Read-UserPrompt {
 }
 
 function Install-RTK {
+    # RTK ships install.sh only (Linux/macOS). No official install.ps1 — main/ and install.ps1 404.
+    # Windows: prebuilt zip from GitHub releases, or WSL + install.sh.
+    $rtkUnixInstall = "curl -fsSL https://raw.githubusercontent.com/rtk-ai/rtk/refs/heads/master/install.sh | sh"
+    $rtkWinHint = "Windows: download rtk-x86_64-pc-windows-msvc.zip from https://github.com/rtk-ai/rtk/releases — extract rtk.exe to PATH (e.g. %USERPROFILE%\.local\bin). Or use WSL: $rtkUnixInstall"
+
     if (Test-Command "rtk") {
         Write-Skip "RTK already installed: $(rtk --version 2>&1)"
         return
     }
     if (-not (Test-IsInteractive)) {
         Write-Warn "Non-interactive mode: skipping RTK install."
-        Write-Info "Install later: irm https://raw.githubusercontent.com/rtk-ai/rtk/main/install.ps1 | iex"
+        Write-Info "Install later: $rtkWinHint"
         return
     }
     Write-Info "RTK — AI token saver (60-90% less tokens). Install?"
     $ans = Read-UserPrompt "  [Y/n]"
     if ($ans -match "^(n|N|no|NO)") { Write-Warn "Skipping RTK install."; return }
     Write-Info "Installing RTK..."
-    try {
-        & cmd /c "curl -fsSL https://raw.githubusercontent.com/rtk-ai/rtk/main/install.ps1 | powershell -c -"
-        Write-Ok "RTK installed."
-    } catch {
-        Write-Warn "RTK install failed. Install manually: irm https://raw.githubusercontent.com/rtk-ai/rtk/main/install.ps1 | iex"
+    # Prefer WSL if present (full install.sh path); otherwise print manual Windows steps.
+    $wsl = Get-Command wsl -ErrorAction SilentlyContinue
+    if ($null -ne $wsl) {
+        try {
+            wsl bash -lc $rtkUnixInstall
+            Write-Ok "RTK installed via WSL. Run: wsl rtk init -g --opencode"
+            return
+        } catch {
+            Write-Warn "WSL RTK install failed."
+        }
     }
+    Write-Warn "No automated Windows installer (RTK has no install.ps1)."
+    Write-Info $rtkWinHint
+    Write-Info "After install, verify: rtk --version && rtk gain"
 }
 
 function Install-Ponytail {
