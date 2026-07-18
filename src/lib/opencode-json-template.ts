@@ -23,7 +23,16 @@ interface NativeAgentEntry {
   mode: "primary" | "subagent" | "all";
   prompt: string;
   permission?: Record<string, unknown>;
+  disable?: boolean;
 }
+
+/** OpenCode built-in primary; RSY uses coder instead. */
+export const DISABLED_BUILTIN_BUILD_AGENT = {
+  disable: true,
+  description: "OpenCode built-in build (disabled — use coder)",
+} as const;
+
+export const DEFAULT_AGENT = "coder";
 
 /** Safe-by-default permissions (OpenCode docs). User rules still win on merge. */
 export const DEFAULT_PERMISSION: Record<string, unknown> = {
@@ -285,7 +294,7 @@ export const DEFAULT_OPENCODE_GOAL_PLUGIN = [
     max_auto_turns: 25,
     min_continue_interval_seconds: 3,
     max_prompt_failures: 3,
-    // plan + plan-critic stay planning-only; execution resumes on coder/build
+    // plan + plan-critic stay planning-only; execution resumes on coder
     restricted_agents: ["plan", "plan-critic"],
     allow_goal_execution_from_plan: false,
   },
@@ -301,16 +310,22 @@ export const DEFAULT_SUBAGENT_DEPTH = 3;
 export function buildDefaultOpenCodeJson(configDir: string, agentConfigs?: Record<string, { systemPrompt: string }>): Record<string, unknown> {
   // Auto-detect installed LSP servers
   const lsp = detectInstalledLsp(configDir);
+  const agents = agentConfigs ? buildNativeAgents(agentConfigs) : {};
 
   return {
     $schema: "https://opencode.ai/config.json",
+    default_agent: DEFAULT_AGENT,
     // Top-level OpenCode key (O.subagent_depth). Not agent-level.
     subagent_depth: DEFAULT_SUBAGENT_DEPTH,
     plugin: [
       `file://${configDir.replace(/\\/g, "/")}/cli/src/plugin/index.ts`,
       DEFAULT_OPENCODE_GOAL_PLUGIN,
     ],
-    agent: agentConfigs ? buildNativeAgents(agentConfigs) : {},
+    agent: {
+      ...agents,
+      // Hide OpenCode built-in primary; RSY principal is coder.
+      build: { ...DISABLED_BUILTIN_BUILD_AGENT },
+    },
     permission: DEFAULT_PERMISSION,
     formatter: true,
     command: DEFAULT_COMMANDS,

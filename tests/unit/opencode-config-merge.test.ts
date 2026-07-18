@@ -57,6 +57,11 @@ describe("opencode config merge", () => {
     const merged = JSON.parse(readFileSync(join(configDir, "opencode.json"), "utf8"));
     expect(merged.formatter).toBe(true);
     expect(merged.subagent_depth).toBe(3);
+    expect(merged.default_agent).toBe("coder");
+    expect(merged.agent.build).toEqual({
+      disable: true,
+      description: "OpenCode built-in build (disabled — use coder)",
+    });
     expect(merged.permission.read["*.env"]).toBe("deny");
     expect(merged.permission.bash["rm -rf *"]).toBe("deny");
     expect(merged.permission.doom_loop).toBe("ask");
@@ -67,6 +72,21 @@ describe("opencode config merge", () => {
     expect(merged.command.plan).toBeTruthy();
     expect(merged.agent.explorer.permission.edit).toBe("deny");
     expect(merged.agent.plan.permission.edit).toBe("deny");
+  });
+
+  test("disables built-in build and remaps default_agent build→coder", () => {
+    const configDir = tempConfigDir();
+    writeFileSync(join(configDir, "opencode.json"), JSON.stringify({
+      default_agent: "build",
+      agent: {
+        build: { mode: "primary", prompt: "stock build" },
+      },
+    }, null, 2));
+    ensureOpenCodeJsonEntries(configDir);
+    const merged = JSON.parse(readFileSync(join(configDir, "opencode.json"), "utf8"));
+    expect(merged.default_agent).toBe("coder");
+    expect(merged.agent.build.disable).toBe(true);
+    expect(merged.agent.coder.mode).toBe("primary");
   });
 
   test("fills missing subagent_depth without clobbering user value", () => {

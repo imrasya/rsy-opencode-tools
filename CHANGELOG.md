@@ -6,6 +6,20 @@ Format based on [Keep a Changelog](https://keepachangelog.com/), versioned with 
 
 ---
 
+## [1.0.2] - 2026-07-18
+
+### Fixed
+- **gopls / `install_gopls`**: discover Go on brew/official paths; prepend `GOPATH/bin` + `GOBIN` before verify; macOS prefers `brew install gopls` then `go install`; LSP loop prints last 5 error lines instead of silent `&>/dev/null`.
+- **Windows gopls** (`Install-GoLsp`): refresh PATH after winget; add `GOPATH\bin`/`GOBIN` after install.
+
+### Changed
+- **Default agent**: `default_agent: coder`; OpenCode built-in `build` agent force-disabled (`disable: true`) in template, merge, and plugin config hook. Remaps `default_agent: "build"` → `coder` on ensure.
+- Version synced to `1.0.2` for self-update pickup.
+
+### Verification
+- `bash -n install.sh` exit 0.
+- `bun test tests/unit/version-sync.test.ts tests/unit/ui.test.ts tests/unit/plugin-workflow-tool.test.ts tests/unit/audit-fixes.test.ts tests/unit/opencode-config-merge.test.ts` pass.
+
 ## [1.0.1] - 2026-07-18
 
 ### Fixed

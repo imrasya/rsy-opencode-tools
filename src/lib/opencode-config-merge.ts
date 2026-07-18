@@ -1,6 +1,11 @@
 import { existsSync, mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync, readdirSync } from "fs";
 import { join } from "path";
-import { buildDefaultOpenCodeJson, buildDefaultTuiJson } from "./opencode-json-template.js";
+import {
+  buildDefaultOpenCodeJson,
+  buildDefaultTuiJson,
+  DEFAULT_AGENT,
+  DISABLED_BUILTIN_BUILD_AGENT,
+} from "./opencode-json-template.js";
 import { buildAgentConfigs } from "../plugin/config.js";
 import { cleanupLegacyMcpEntries } from "./version.js";
 
@@ -335,14 +340,21 @@ export function ensureOpenCodeJsonEntries(configDir: string): EnsureOpenCodeJson
   // Merge RSY defaults first, then sanitize: strips mode:null / non-object
   // leftovers that OpenCode schema rejects (config.get / app.agents 500).
   const mergedAgents = mergeRecord(merged.agent, defaults.agent);
-  merged.agent = sanitizeAgentMap(mergedAgents).agent;
+  const sanitized = sanitizeAgentMap(mergedAgents).agent;
+  // Always disable OpenCode built-in `build` — RSY principal is coder.
+  sanitized.build = { ...DISABLED_BUILTIN_BUILD_AGENT };
+  merged.agent = sanitized;
   merged.mcp = mergeRecord(merged.mcp, defaults.mcp);
   merged.lsp = mergeRecord(merged.lsp, defaults.lsp);
-  // permission / command / formatter / subagent_depth: only fill when missing (never clobber user)
+  // permission / command / formatter / subagent_depth / default_agent: fill when missing (never clobber user except build→coder)
   if (!("permission" in merged) && "permission" in defaults) merged.permission = defaults.permission;
   if (!("formatter" in merged) && "formatter" in defaults) merged.formatter = defaults.formatter;
   if (!("subagent_depth" in merged) && "subagent_depth" in defaults) {
     merged.subagent_depth = defaults.subagent_depth;
+  }
+  const defaultAgent = typeof defaults.default_agent === "string" ? defaults.default_agent : DEFAULT_AGENT;
+  if (!("default_agent" in merged) || merged.default_agent === "build" || merged.default_agent === "") {
+    merged.default_agent = defaultAgent;
   }
   if ("command" in defaults) merged.command = mergeRecord(merged.command, defaults.command);
   cleanupLegacyMcpEntries(merged as Record<string, any>);

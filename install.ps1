@@ -5,7 +5,7 @@
 # ===================================================================
 
 $ErrorActionPreference = "Stop"
-$Version = "1.0.1"
+$Version = "1.0.2"
 $RepoUrl = "https://github.com/imrasya/rsy-opencode-tools.git"
 $TempDir = Join-Path $env:TEMP "rsy-opencode-tools-install-$([System.IO.Path]::GetRandomFileName())"
 $JceBinDir = Join-Path $env:USERPROFILE ".rsy-opencode-tools\bin"
@@ -274,13 +274,28 @@ function Install-GoLsp {
 
     Add-UserPath "C:\Program Files\Go\bin"
     Add-UserPath (Join-Path $env:USERPROFILE "go\bin")
+    # Refresh session PATH so freshly installed go is visible
+    $env:Path = [System.Environment]::GetEnvironmentVariable("Path", "Machine") + ";" + [System.Environment]::GetEnvironmentVariable("Path", "User")
 
     $go = Get-KnownCommandPath "go"
     if (-not $go) { throw "Go installed but go.exe not found; restart terminal and rerun installer" }
 
+    # Ensure gopls install target is on PATH (GOBIN or GOPATH\bin)
+    $gopath = & $go env GOPATH 2>$null
+    if (-not $gopath) { $gopath = Join-Path $env:USERPROFILE "go" }
+    $gobin = & $go env GOBIN 2>$null
+    Add-UserPath (Join-Path $gopath "bin")
+    if ($gobin) { Add-UserPath $gobin }
+
+    if (Test-Command "gopls") { return }
+
     Write-Host "(building gopls, this can take a few minutes) " -NoNewline -ForegroundColor DarkGray
     Invoke-NativeCommand $go @("install", "golang.org/x/tools/gopls@latest")
-    if (-not (Test-Command "gopls")) { throw "gopls installed but not found on PATH" }
+    # Re-add bin dirs after install (new files under GOPATH\bin)
+    Add-UserPath (Join-Path $gopath "bin")
+    if ($gobin) { Add-UserPath $gobin }
+    $env:Path = [System.Environment]::GetEnvironmentVariable("Path", "Machine") + ";" + [System.Environment]::GetEnvironmentVariable("Path", "User")
+    if (-not (Test-Command "gopls")) { throw "gopls installed but not found on PATH (expected under $gopath\bin). Add it to PATH and re-run." }
 }
 
 function Install-Jdtls {

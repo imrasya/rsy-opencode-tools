@@ -8,7 +8,7 @@ import { BackgroundManager } from "./background/manager.js";
 import { extractPromptText } from "./background/spawner.js";
 import { buildDispatchTool, buildStatusTool, buildCollectTool } from "./tools/dispatch.js";
 import { buildAgentConfigs } from "./config.js";
-import { buildNativeAgents } from "../lib/opencode-json-template.js";
+import { buildNativeAgents, DEFAULT_AGENT, DISABLED_BUILTIN_BUILD_AGENT } from "../lib/opencode-json-template.js";
 import { sanitizeAgentMap } from "../lib/opencode-config-merge.js";
 import { analyzeCommentDensity, COMMENT_WARNING } from "./hooks/comment-checker.js";
 import { looksLikeCompletionClaim, looksLikeStopEarlyOrConfirmation, shouldWarnForMissingVerification, VERIFICATION_WARNING } from "./hooks/worker-guard.js";
@@ -518,6 +518,11 @@ async function createRsyHooks(input: Parameters<Plugin>[0]): Promise<Hooks> {
       // and crash config.get + app.agents (startup "4 of 5 requests failed").
       const cleaned = sanitizeAgentMap((config as any).agent);
       (config as any).agent = cleaned.agent;
+      // Hide OpenCode built-in primary; RSY principal is coder.
+      (config as any).agent.build = { ...DISABLED_BUILTIN_BUILD_AGENT };
+      if (!(config as any).default_agent || (config as any).default_agent === "build") {
+        (config as any).default_agent = DEFAULT_AGENT;
+      }
       // Native OpenCode shape: description + mode + prompt (+ permission).
       // Plugin builders only expose systemPrompt — map so @mention autocomplete works.
       // Re-read settings each config pass so /rsy-agent-model applies without restart.

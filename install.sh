@@ -6,7 +6,7 @@ set -euo pipefail
 # One command to install everything you need for RSY Open Code Tools CLI
 # ═══════════════════════════════════════════════════════════════
 
-VERSION="1.0.1"
+VERSION="1.0.2"
 REPO_URL="https://github.com/imrasya/rsy-opencode-tools.git"
 # LOCAL_SOURCE=/path/to/workspace → install from local tree (skip git clone). For pre-push dry-runs.
 LOCAL_SOURCE="${LOCAL_SOURCE:-}"
@@ -834,16 +834,40 @@ ensure_cargo() {
     command -v cargo &>/dev/null
 }
 
+# Prepend dir to PATH if it exists and is not already present.
+path_prepend() {
+    local d="$1"
+    [ -n "$d" ] && [ -d "$d" ] || return 0
+    case ":$PATH:" in *":$d:"*) ;; *) PATH="$d:$PATH" ;; esac
+    export PATH
+}
+
+# Discover go on common install paths (brew, official tarball, distro).
+find_go_bin_dirs() {
+    path_prepend /opt/homebrew/bin
+    path_prepend /usr/local/go/bin
+    path_prepend /usr/local/bin
+    path_prepend /usr/lib/go/bin
+    path_prepend "${HOME}/.local/go/bin"
+    path_prepend "${HOME}/sdk/go/bin"
+}
+
 ensure_go() {
+    find_go_bin_dirs
     if command -v go &>/dev/null; then return 0; fi
     info "Go is required for gopls. Installing Go..."
     case "$PKG_MGR" in
-        apt)    install_system_packages golang-go;;
-        dnf)    install_system_packages golang;;
-        pacman) install_system_packages go;;
-        brew)   install_system_packages go;;
-        *)      return 1;;
+        apt)    install_system_packages golang-go || return 1;;
+        dnf)    install_system_packages golang || return 1;;
+        pacman) install_system_packages go || return 1;;
+        brew)   install_system_packages go || return 1;;
+        *)
+            warn "No package manager to install Go. Install from https://go.dev/dl then re-run."
+            return 1
+            ;;
     esac
+    find_go_bin_dirs
+    hash -r 2>/dev/null || true
     command -v go &>/dev/null
 }
 
@@ -1053,9 +1077,34 @@ install_dart_linux() {
 }
 
 install_gopls() {
+    # gopls lands in GOBIN or GOPATH/bin — often missing from PATH mid-install.
     ensure_go || return 1
-    go install golang.org/x/tools/gopls@latest
-    export PATH="${HOME}/go/bin:${PATH}"
+
+    local gopath gobin
+    gopath="$(go env GOPATH 2>/dev/null || true)"
+    gobin="$(go env GOBIN 2>/dev/null || true)"
+    [ -z "$gopath" ] && gopath="${HOME}/go"
+    path_prepend "${gopath}/bin"
+    path_prepend "${HOME}/go/bin"
+    [ -n "$gobin" ] && path_prepend "$gobin"
+
+    if command -v gopls &>/dev/null; then return 0; fi
+
+    # macOS: brew formula is faster than compiling gopls from source
+    if [ "$PKG_MGR" = "brew" ]; then
+        if brew install gopls 2>/dev/null; then
+            path_prepend /opt/homebrew/bin
+            path_prepend /usr/local/bin
+            command -v gopls &>/dev/null && return 0
+        fi
+    fi
+
+    # Build/install into GOPATH/bin (default go install target)
+    go install golang.org/x/tools/gopls@latest || return 1
+    path_prepend "${gopath}/bin"
+    path_prepend "${HOME}/go/bin"
+    [ -n "$gobin" ] && path_prepend "$gobin"
+    hash -r 2>/dev/null || true
     command -v gopls &>/dev/null
 }
 
@@ -1357,15 +1406,22 @@ select_and_install_lsp() {
             continue
         fi
 
-        # Subshell: LSP helpers must never abort the whole installer (set -e / exit)
-        if ( eval "$install_cmd" ) &>/dev/null; then
+        # Subshell: LSP helpers must never abort the whole installer (set -e / exit).
+        # Capture stderr so gopls/cargo failures are debuggable (was fully silenced).
+        local lsp_log="${TEMP_DIR}/lsp-install-${idx}.log"
+        if ( eval "$install_cmd" ) >"$lsp_log" 2>&1; then
             echo -e "${GREEN}✅${NC}"
             installed_count=$((installed_count + 1))
         else
             echo -e "${YELLOW}⚠️  Failed${NC}"
             warn "  Command: $install_cmd"
+            if [ -s "$lsp_log" ]; then
+                warn "  Last error lines:"
+                tail -n 5 "$lsp_log" | sed 's/^/    /' >&2 || true
+            fi
             failed_count=$((failed_count + 1))
         fi
+        rm -f "$lsp_log" 2>/dev/null || true
     done
 
     LSP_INSTALLED=$installed_count

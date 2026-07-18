@@ -70,12 +70,20 @@ describe("audit fixes", () => {
 
   test("OpenCode template can expose bundled Coder native agent after restart", async () => {
     const { buildAgentConfigs } = await import("../../src/plugin/config.js");
-    const config = buildDefaultOpenCodeJson("/tmp/opencode", buildAgentConfigs()) as { agent: Record<string, { description: string; mode: string; prompt: string }> };
+    const config = buildDefaultOpenCodeJson("/tmp/opencode", buildAgentConfigs()) as {
+      default_agent: string;
+      agent: Record<string, { description: string; mode?: string; prompt?: string; disable?: boolean }>;
+    };
 
+    expect(config.default_agent).toBe("coder");
     expect(config.agent.coder).toBeDefined();
     expect(config.agent.coder.mode).toBe("primary");
     expect(config.agent.coder.description).toContain("Primary orchestrator");
     expect(config.agent.coder.prompt).toContain("Explore-Before-Code");
+    expect(config.agent.build).toEqual({
+      disable: true,
+      description: "OpenCode built-in build (disabled — use coder)",
+    });
   });
 
   test("OpenCode template sets top-level subagent_depth for nested Task/*", () => {
@@ -179,6 +187,10 @@ describe("audit fixes", () => {
     expect(sh).toContain("install_metals");
     expect(sh).toContain("ensure_cargo");
     expect(sh).toContain("ensure_go");
+    expect(sh).toContain("find_go_bin_dirs");
+    expect(sh).toContain("path_prepend");
+    expect(sh).toContain('go env GOPATH');
+    expect(sh).toContain("brew install gopls");
     expect(sh).toContain("ensure_ruby");
     expect(sh).toContain("ensure_dotnet");
     expect(sh).toContain("ensure_elixir");
@@ -202,7 +214,10 @@ describe("audit fixes", () => {
     expect(cargo).toContain("warn \"Rustup auto-install disabled");
 
     // per-LSP install in subshell so set -e / exit cannot abort installer
+    // stderr captured to log (not fully silenced) for gopls/cargo debug
     expect(sh).toContain('( eval "$install_cmd" )');
+    expect(sh).toContain('lsp-install-${idx}.log');
+    expect(sh).toContain("Last error lines:");
 
     // famous preset
     expect(sh).toContain("FAMOUS_LSP_NUMS");

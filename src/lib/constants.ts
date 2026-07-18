@@ -1,5 +1,5 @@
 // ─── Version ─────────────────────────────────────────────────
-export const VERSION = "1.0.1";
+export const VERSION = "1.0.2";
 
 // ─── GitHub ──────────────────────────────────────────────────
 export const GITHUB_REPO = "imrasya/rsy-opencode-tools";
