@@ -356,7 +356,7 @@ describe("plugin integration", () => {
 
     const config: any = { agent: {} };
     await hooks.config!(config);
-    expect(Object.keys(config.agent)).toHaveLength(9);
+    expect(Object.keys(config.agent)).toHaveLength(10);
     expect(config.agent.coder).toBeDefined();
     expect(config.agent.orchestration).toBeDefined();
     expect(config.agent.debugger).toBeDefined();
@@ -366,6 +366,7 @@ describe("plugin integration", () => {
     expect(config.agent["plan-critic"]).toBeDefined();
     expect(config.agent.android).toBeDefined();
     expect(config.agent.researcher).toBeDefined();
+    expect(config.agent.build).toBeDefined();
     expect(config.agent["jce-worker"]).toBeUndefined();
     expect(config.agent["jce-researcher"]).toBeUndefined();
     } finally {
@@ -390,7 +391,7 @@ describe("plugin integration", () => {
       const hooks = await mod.default.server({ ...mockInput, directory: tempRoot(), worktree: tempRoot() });
       const config: any = { agent: {} };
       await hooks.config!(config);
-      expect(Object.keys(config.agent).sort()).toEqual(["android", "coder", "debugger", "explorer", "frontend", "orchestration", "plan", "plan-critic", "researcher"].sort());
+      expect(Object.keys(config.agent).sort()).toEqual(["android", "build", "coder", "debugger", "explorer", "frontend", "orchestration", "plan", "plan-critic", "researcher"].sort());
       expect(config.agent.oracle).toBeUndefined();
       expect(config.agent["jce-worker"]).toBeUndefined();
       expect(config.agent.tester).toBeUndefined();
@@ -448,7 +449,7 @@ describe("plugin integration", () => {
 
     const config: any = {};
     await hooks.config!(config);
-    expect(Object.keys(config.agent)).toHaveLength(9);
+    expect(Object.keys(config.agent)).toHaveLength(10);
     } finally {
       if (oldXdg === undefined) delete process.env.XDG_CONFIG_HOME;
       else process.env.XDG_CONFIG_HOME = oldXdg;

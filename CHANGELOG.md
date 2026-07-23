@@ -6,6 +6,14 @@ Format based on [Keep a Changelog](https://keepachangelog.com/), versioned with 
 
 ---
 
+## [1.0.3] - 2026-07-23
+
+### Fixed
+- **`tests/unit/plugin-integration.test.ts`**: config hook injects `agent.build` (intentional, `src/plugin/index.ts:522`); tests updated to expect 10 agents (including `build`) instead of 9.
+
+### Changed
+- Version synced to `1.0.3` (package.json, constants, installers, MCP context-keeper, config version, README badge, version tests) so installed clients pick up the fix via self-update.
+
 ## [1.0.2] - 2026-07-18
 
 ### Fixed

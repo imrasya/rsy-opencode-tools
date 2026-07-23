@@ -5,7 +5,7 @@
 # ===================================================================
 
 $ErrorActionPreference = "Stop"
-$Version = "1.0.2"
+$Version = "1.0.3"
 $RepoUrl = "https://github.com/imrasya/rsy-opencode-tools.git"
 $TempDir = Join-Path $env:TEMP "rsy-opencode-tools-install-$([System.IO.Path]::GetRandomFileName())"
 $JceBinDir = Join-Path $env:USERPROFILE ".rsy-opencode-tools\bin"

@@ -6,7 +6,7 @@ set -euo pipefail
 # One command to install everything you need for RSY Open Code Tools CLI
 # ═══════════════════════════════════════════════════════════════
 
-VERSION="1.0.2"
+VERSION="1.0.3"
 REPO_URL="https://github.com/imrasya/rsy-opencode-tools.git"
 # LOCAL_SOURCE=/path/to/workspace → install from local tree (skip git clone). For pre-push dry-runs.
 LOCAL_SOURCE="${LOCAL_SOURCE:-}"
